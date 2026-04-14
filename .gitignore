@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Output e debug
+run_debug/
+summary/
+
+# Log e dati
+*.log
+*.dat
+*.txt
+
+# XFOIL files
+*.bl
+*.cp
