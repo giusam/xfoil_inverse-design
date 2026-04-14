@@ -57,11 +57,30 @@ def optimize_for_centers(
     bmin, bmax = SETTINGS["optimization"]["bounds"]
     bounds = [(bmin, bmax)] * (len(upper_centers) + len(lower_centers))
 
+
+    # Gradient snapshots for debug/scaling analysis
+    def _save_gradient_snapshot(tag, a_vec):
+        if not hasattr(objective, "compute_gradient_snapshot"):
+            return
+        if not hasattr(objective, "append_grad_history"):
+            return
+
+        print(f"\n>>> Computing gradient snapshot: {tag}")
+        g_vec = objective.compute_gradient_snapshot(np.asarray(a_vec, dtype=float))
+        objective.append_grad_history(objective.eval_counter["k"], g_vec)
+
+        grad_norm = np.linalg.norm(g_vec)
+        grad_max = np.max(np.abs(g_vec)) if len(g_vec) > 0 else 0.0
+        print(f">>> Gradient snapshot saved: {tag}")
+        print(f">>> ||g||_2 = {grad_norm:.6e}")
+        print(f">>> max|g|  = {grad_max:.6e}")
+
     print(f"\n===== OBJECTIVE CHECK AT a0 ({label}) =====")
     j0 = objective(a0)
     print(f"Initial objective value at a0 = {j0:.6e}")
     print(f"Dynamic penalty value         = {objective.get_penalty():.6e}")
     print(f"Geometric SLSQP constraints   = {len(geometric_constraints)}")
+    _save_gradient_snapshot(f"{label}_initial", a0)
 
     result = minimize(
         objective,
@@ -76,14 +95,6 @@ def optimize_for_centers(
             "eps": SETTINGS["optimization"]["eps"],
         },
     )
-    a_opt = result.x
-    abs_a = np.abs(a_opt)
-
-    print("\n===== DV SCALE CHECK =====")
-    print(f"max |a_opt|  = {np.max(abs_a):.6e}")
-    print(f"mean |a_opt|  = {np.mean(abs_a):.6e}")
-    print(f"min |a_opt|  = {np.min(abs_a):.6e}")
-    print("=============================\n")
 
     print(f"\n===== OPTIMIZATION RESULT ({label}) =====")
     print("success :", result.success)
@@ -93,6 +104,7 @@ def optimize_for_centers(
     print("nit     :", result.nit)
 
     a_opt = result.x
+    _save_gradient_snapshot(f"{label}_final", a_opt)
 
     nu = len(upper_centers)
     nl = len(lower_centers)

@@ -113,17 +113,17 @@ SETTINGS = {
         "hh_power": 4,
         "n_hh_static": 16,
 
-        "bounds": (-0.005, 0.005),
+        "bounds": (-0.01, 0.01),
 
         "maxiter": 200,
         "ftol": 1.0e-8,
-        "eps": 1.0e-3,
+        "eps": 0.2e-4,
 
         "penalty_factor": 20.0,
 
         "adaptive": {
 
-            "indicator": "IKKT",   # "GRAD" oppure "IKKT"
+            "indicator": "GRAD",   # "GRAD" oppure "IKKT"
             "tol_active": 1.0e-3,  # per le disuguaglianze: attivo se C(a) > -tol_active
 
             "n0": 6,

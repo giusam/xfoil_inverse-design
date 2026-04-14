@@ -78,9 +78,38 @@ def make_objective(
     penalty_floor = 1.0e-6
     aero_constraints, _ = split_constraints_by_domain(SETTINGS.get("constraints", {}))
 
+    # Global logs
+    seed_value = SETTINGS.get("run", {}).get("seed", "unknown")
+    a_history_path = Path(f"a_history_seed_{seed_value}.dat")
+    grad_history_path = Path(f"grad_history_seed_{seed_value}.dat")
+
+    if not a_history_path.exists():
+        with open(a_history_path, "w", encoding="utf-8") as f:
+            f.write("# workdir eval status objective_total a[0] a[1] ...\n")
+
+    if not grad_history_path.exists():
+        with open(grad_history_path, "w", encoding="utf-8") as f:
+            f.write("# eval grad[0] grad[1] ...\n")
+
     def get_penalty():
         scale = max(float(current_best_error), penalty_floor)
         return penalty_factor * scale
+
+    def _append_a_history(k, status, objective_value, a_vec):
+        with open(a_history_path, "a", encoding="utf-8") as f:
+            coeffs = " ".join(f"{float(ai):.10e}" for ai in np.asarray(a_vec, dtype=float))
+            f.write(
+                f"{working_dir.name} "
+                f"{k:05d} "
+                f"{status} "
+                f"{float(objective_value):.10e} "
+                f"{coeffs}\n"
+            )
+
+    def _append_grad_history(k, g_vec):
+        with open(grad_history_path, "a", encoding="utf-8") as f:
+            grads = " ".join(f"{float(gi):.10e}" for gi in np.asarray(g_vec, dtype=float))
+            f.write(f"{k:05d} {grads}\n")
 
     def objective(a):
         eval_counter["k"] += 1
@@ -114,6 +143,9 @@ def make_objective(
                 f"eval={k:04d}  FAIL thickness  "
                 f"min_thickness={min_thickness:.6e}  penalty={penalty_value:.6e}"
             )
+
+            _append_a_history(k, "FAIL_THICKNESS", penalty_value, a)
+
             eval_history.append(
                 {
                     "eval": k,
@@ -139,6 +171,8 @@ def make_objective(
         if not res["success"]:
             penalty_value = get_penalty()
             print(f"eval={k:04d}  FAIL xfoil  penalty={penalty_value:.6e}")
+
+            _append_a_history(k, "FAIL_XFOIL", penalty_value, a)
 
             eval_history.append(
                 {
@@ -176,6 +210,8 @@ def make_objective(
             f"min_thickness={min_thickness:.6e}"
         )
 
+        _append_a_history(k, "OK", objective_total, a)
+
         eval_history.append(
             {
                 "eval": k,
@@ -190,7 +226,34 @@ def make_objective(
 
         return objective_total
 
+    def compute_gradient_snapshot(a, h=2.0e-5):
+        g = np.zeros_like(a, dtype=float)
+
+        for j in range(len(a)):
+            a_p = np.asarray(a, dtype=float).copy()
+            a_m = np.asarray(a, dtype=float).copy()
+
+            a_p[j] += h
+            a_m[j] -= h
+
+            Jp = objective(a_p)
+            Jm = objective(a_m)
+
+            status_p = eval_history[-2]["status"]
+            status_m = eval_history[-1]["status"]
+
+            if status_p != "OK" or status_m != "OK":
+                g[j] = 0.0
+            else:
+                g[j] = (Jp - Jm) / (2.0 * h)
+
+        return g
+
     objective.eval_counter = eval_counter
     objective.eval_history = eval_history
     objective.get_penalty = get_penalty
+    objective.a_history_path = a_history_path
+    objective.grad_history_path = grad_history_path
+    objective.compute_gradient_snapshot = compute_gradient_snapshot
+    objective.append_grad_history = _append_grad_history
     return objective

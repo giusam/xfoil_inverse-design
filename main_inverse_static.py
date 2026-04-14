@@ -35,15 +35,7 @@ def _static_placeholder(err_init, init_res):
             "upper": {"x": np.array([], dtype=float), "cp": np.array([], dtype=float)},
             "lower": {"x": np.array([], dtype=float), "cp": np.array([], dtype=float)},
         },
-        "opt_res": {
-            "polar": {
-                "alpha": float(init_res["polar"]["alpha"]),
-                "CL": float("nan"),
-                "CD": float("nan"),
-                "CM": float("nan"),
-            },
-            "cp_data": cp_data,
-        },
+        "opt_res": {"polar": {"alpha": float(init_res["polar"]["alpha"]), "CL": float("nan"), "CD": float("nan"), "CM": float("nan")}, "cp_data": cp_data},
         "err_opt": float("nan"),
         "result": None,
         "n_objective_evals": 0,
@@ -58,12 +50,20 @@ def _static_placeholder(err_init, init_res):
 
 
 def main():
+
+    # Remove old per-seed debug files at the start of a new script run
+    for pattern in ("a_history_seed_*.dat", "grad_history_seed_*.dat"):
+        for p in Path(".").glob(pattern):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
     results = []
     base_workdir = Path("run_debug")
     if base_workdir.exists():
         shutil.rmtree(base_workdir)
     base_workdir.mkdir(parents=True, exist_ok=True)
-
     for fname in ["ikkt_pairs.log", "ikkt_score.log"]:
         p = Path(fname)
         if p.exists():
@@ -187,7 +187,7 @@ def main():
                 workdir=Path(workdir) / "static",
             )
         else:
-            print("\n===== STATIC OPTIMIZATION =====")
+            print("===== STATIC OPTIMIZATION =====")
             print("Skipped because SETTINGS['run']['do_static'] = False")
             static_out = _static_placeholder(err_init, init_res)
 
@@ -205,26 +205,44 @@ def main():
 
         print_seed_recap(seed, err_init, init_res, static_out, adaptive_out, target_res=target_res)
 
-        save_seed_outputs(
-            summary_dir=summary_dir,
-            workdir=workdir,
-            seed=seed,
-            x=x,
-            yu_target=yu_target,
-            yl_target=yl_target,
-            yu_init=yu_init,
-            yl_init=yl_init,
-            cp_target=cp_target,
-            cp_init=cp_init,
-            err_init=err_init,
-            init_res=init_res,
-            static_out=static_out,
-            adaptive_out=adaptive_out,
-            target_res=target_res,
-        )
-
         if do_static:
+            save_seed_outputs(
+                summary_dir=summary_dir,
+                workdir=workdir,
+                seed=seed,
+                x=x,
+                yu_target=yu_target,
+                yl_target=yl_target,
+                yu_init=yu_init,
+                yl_init=yl_init,
+                cp_target=cp_target,
+                cp_init=cp_init,
+                err_init=err_init,
+                init_res=init_res,
+                static_out=static_out,
+                adaptive_out=adaptive_out,
+                target_res=target_res,
+            )
+
             results.append(make_seed_result(seed, err_init, static_out, adaptive_out))
+        else:
+            with open(summary_dir / "summary.txt", "w", encoding="utf-8") as f:
+                f.write("===== FINAL RECAP =====\n")
+                f.write(f"seed                 = {seed}\n")
+                f.write(f"Initial Cp error     = {err_init:.6e}\n")
+                f.write("Static Cp error      = SKIPPED\n")
+                f.write(f"Adaptive Cp error    = {adaptive_out['err_opt']:.6e}\n")
+                f.write(f"Adaptive BEST error  = {adaptive_out['best_err_opt']:.6e}\n")
+                f.write(f"Adaptive BEST ndv    = {adaptive_out['best_ndv_total']}\n")
+                f.write("\n")
+                f.write(f"Target CL            = {target_res['polar']['CL']:.6e}\n")
+                f.write(f"Adaptive CL          = {adaptive_out['opt_res']['polar']['CL']:.6e}\n")
+                f.write(f"Adaptive CD          = {adaptive_out['opt_res']['polar']['CD']:.6e}\n")
+                f.write(f"Adaptive CM          = {adaptive_out['opt_res']['polar']['CM']:.6e}\n")
+                f.write("\n")
+                f.write(f"Adaptive evals opt   = {adaptive_out['n_optimization_evals_total']}\n")
+                f.write(f"Adaptive evals score = {adaptive_out['n_scoring_evals_total']}\n")
+                f.write(f"Adaptive XFOIL calls = {adaptive_out['n_total_evals']}\n")
 
         cleanup_debug_files(workdir)
 
