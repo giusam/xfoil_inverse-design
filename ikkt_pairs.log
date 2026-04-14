@@ -1,0 +1,29 @@
+
+===== SAME-X PAIRS =====
+x=0.275000
+  side=LOWER score=2.908245e-01  component=-2.908245e-01  raw=-2.824579e-01
+  side=UPPER score=5.577973e-02  component=-5.577973e-02  raw=-2.129703e-02
+x=0.725000
+  side=LOWER score=1.890143e-01  component=1.890143e-01  raw=2.506963e-01
+  side=UPPER score=8.575000e-02  component=-8.575000e-02  raw=-5.459733e-02
+
+===== SAME-X PAIRS =====
+No same-x upper/lower pairs in current candidate set.
+
+===== SAME-X PAIRS =====
+x=0.162500
+  side=LOWER score=1.496581e-02  component=-1.496581e-02  raw=-1.496581e-02
+  side=UPPER score=2.940827e-01  component=-2.940827e-01  raw=-3.062464e-01
+
+===== SAME-X PAIRS =====
+x=0.331250
+  side=LOWER score=1.947450e-03  component=1.947450e-03  raw=1.947450e-03
+  side=UPPER score=1.273900e-01  component=1.273900e-01  raw=1.290890e-01
+x=0.443750
+  side=LOWER score=2.379251e-02  component=2.379251e-02  raw=2.379251e-02
+  side=UPPER score=1.034047e-01  component=1.034047e-01  raw=1.036929e-01
+
+===== SAME-X PAIRS =====
+x=0.443750
+  side=LOWER score=1.907650e-02  component=1.907650e-02  raw=1.907650e-02
+  side=UPPER score=0.000000e+00  component=0.000000e+00  raw=0.000000e+00

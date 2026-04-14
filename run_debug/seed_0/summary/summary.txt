@@ -1,0 +1,72 @@
+===== FINAL RECAP =====
+seed                 = 0
+Initial Cp error     = 5.702085e-03
+Static Cp error      = SKIPPED
+Adaptive Cp error    = 3.160360e-04
+Adaptive BEST error  = 3.160360e-04
+Adaptive BEST ndv    = 16
+
+Static last Jcp      = SKIPPED
+Static last Pcon     = SKIPPED
+Static last Jtot     = SKIPPED
+Adaptive last Jcp    = 3.160360e-04
+Adaptive last Pcon   = 5.644971e-06
+Adaptive last Jtot   = 3.216810e-04
+
+Target CL            = 1.935000e-01
+Target CD            = 5.690000e-03
+Target CM            = 7.700000e-03
+
+Initial CL           = 2.307000e-01
+Initial CD           = 6.900000e-03
+Initial CM           = -7.500000e-03
+
+Static CL            = SKIPPED
+Static CD            = SKIPPED
+Static CM            = SKIPPED
+
+Adaptive CL          = 1.879000e-01
+Adaptive CD          = 5.770000e-03
+Adaptive CM          = 7.400000e-03
+
+Adaptive BEST CL     = 1.879000e-01
+Adaptive BEST CD     = 5.770000e-03
+Adaptive BEST CM     = 7.400000e-03
+
+ΔCL Static           = SKIPPED
+ΔCL Adaptive         = -5.600000e-03
+ΔCL Adaptive BEST    = -5.600000e-03
+
+Static objective evals      = SKIPPED
+Static XFOIL calls          = SKIPPED
+Adaptive evals opt          = 5260
+Adaptive evals score        = 1000
+Adaptive XFOIL calls        = 6266
+
+Adaptive history:
+  ndv =  6 | Cp error = 5.574524e-03
+  ndv =  8 | Cp error = 2.812662e-03
+  ndv = 10 | Cp error = 2.126542e-03
+  ndv = 12 | Cp error = 8.822512e-04
+  ndv = 14 | Cp error = 8.350548e-04
+  ndv = 16 | Cp error = 3.160360e-04
+
+Adaptive center history:
+  ndv   =  6
+    upper = [0.050000, 0.500000, 0.950000]
+    lower = [0.050000, 0.500000, 0.950000]
+  ndv   =  8
+    upper = [0.050000, 0.500000, 0.950000]
+    lower = [0.050000, 0.275000, 0.500000, 0.725000, 0.950000]
+  ndv   = 10
+    upper = [0.050000, 0.275000, 0.500000, 0.950000]
+    lower = [0.050000, 0.275000, 0.387500, 0.500000, 0.725000, 0.950000]
+  ndv   = 12
+    upper = [0.050000, 0.162500, 0.275000, 0.387500, 0.500000, 0.950000]
+    lower = [0.050000, 0.275000, 0.387500, 0.500000, 0.725000, 0.950000]
+  ndv   = 14
+    upper = [0.050000, 0.106250, 0.162500, 0.275000, 0.331250, 0.387500, 0.500000, 0.950000]
+    lower = [0.050000, 0.275000, 0.387500, 0.500000, 0.725000, 0.950000]
+  ndv   = 16
+    upper = [0.050000, 0.106250, 0.134375, 0.162500, 0.275000, 0.331250, 0.359375, 0.387500, 0.500000, 0.950000]
+    lower = [0.050000, 0.275000, 0.387500, 0.500000, 0.725000, 0.950000]
