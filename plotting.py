@@ -2,6 +2,8 @@ import math
 import matplotlib.pyplot as plt
 import numpy as np
 
+def _set_log_error_axis():
+    plt.yscale("log")
 
 def plot_multiple_initial_geometries(x, yu_target, yl_target, initial_geometries, title="Initial geometries"):
     plt.figure(figsize=(10, 4))
@@ -243,15 +245,17 @@ def plot_3way_cp_comparison(
 
 def plot_error_vs_seed(results, savepath=None):
     seeds = [r["seed"] for r in results]
-    static_err = [r["static_err"] for r in results]
-    adaptive_err = [r["adaptive_err"] for r in results]
-    adaptive_best_err = [r["adaptive_best_err"] for r in results]
+    static_err = np.array([r["static_err"] for r in results], dtype=float)
+    adaptive_err = np.array([r["adaptive_err"] for r in results], dtype=float)
+    adaptive_best_err = np.array([r["adaptive_best_err"] for r in results], dtype=float)
 
     plt.figure(figsize=(8, 4))
-    plt.plot(seeds, static_err, "o-", lw=2, label="Static")
+    if np.any(np.isfinite(static_err)):
+        plt.plot(seeds, static_err, "o-", lw=2, label="Static")
     plt.plot(seeds, adaptive_err, "s-", lw=2, label="Adaptive final")
     plt.plot(seeds, adaptive_best_err, "^-", lw=2, label="Adaptive best")
 
+    _set_log_error_axis()
     plt.grid(True, alpha=0.3)
     plt.xlabel("Seed")
     plt.ylabel("Cp error")
@@ -267,23 +271,29 @@ def plot_error_vs_seed(results, savepath=None):
 
 
 def plot_error_mean_std(results, savepath=None):
-    labels = ["Static", "Adaptive final", "Adaptive best"]
-    means = [
-        np.mean([r["static_err"] for r in results]),
-        np.mean([r["adaptive_err"] for r in results]),
-        np.mean([r["adaptive_best_err"] for r in results]),
+    series = [
+        ("Static", np.array([r["static_err"] for r in results], dtype=float)),
+        ("Adaptive final", np.array([r["adaptive_err"] for r in results], dtype=float)),
+        ("Adaptive best", np.array([r["adaptive_best_err"] for r in results], dtype=float)),
     ]
-    stds = [
-        np.std([r["static_err"] for r in results]),
-        np.std([r["adaptive_err"] for r in results]),
-        np.std([r["adaptive_best_err"] for r in results]),
-    ]
+
+    labels = []
+    means = []
+    stds = []
+    for label, values in series:
+        finite = values[np.isfinite(values)]
+        if len(finite) == 0:
+            continue
+        labels.append(label)
+        means.append(np.mean(finite))
+        stds.append(np.std(finite))
 
     x = np.arange(len(labels))
 
     plt.figure(figsize=(7, 4))
     plt.bar(x, means, yerr=stds, capsize=5)
     plt.xticks(x, labels)
+    _set_log_error_axis()
     plt.ylabel("Cp error")
     plt.title("Mean Cp error ± std across seeds")
     plt.grid(True, axis="y", alpha=0.3)
@@ -306,12 +316,13 @@ def plot_error_vs_evals_with_refine(
 ):
     plt.figure(figsize=(8, 4))
 
-    plt.plot(
-        [0, static_calls],
-        [initial_err, static_err],
-        "o-",
-        label="Static Cp error",
-    )
+    if static_calls is not None and static_err is not None and np.isfinite(static_err):
+        plt.plot(
+            [0, static_calls],
+            [initial_err, static_err],
+            "o-",
+            label="Static Cp error",
+        )
 
     errs = [e for (_, e) in adaptive_history]
     ndvs = [m for (m, _) in adaptive_history]
@@ -327,6 +338,7 @@ def plot_error_vs_evals_with_refine(
         plt.axvline(x=x, linestyle="--", alpha=0.3)
         plt.text(x, y, f"{ndv}", fontsize=8)
 
+    _set_log_error_axis()
     plt.xlabel("XFOIL calls")
     plt.ylabel("Cp error")
     plt.title("Cp error vs evaluations (with refine)")
@@ -359,7 +371,8 @@ def plot_error_vs_evals_full(
         static_x.append(item["eval"])
         static_y.append(yval)
 
-    plt.plot(static_x, static_y, "-", lw=2, label="Static Cp error")
+    if len(static_x) > 1:
+        plt.plot(static_x, static_y, "-", lw=2, label="Static Cp error")
 
     adaptive_x = [0]
     adaptive_y = [initial_err]
@@ -394,6 +407,7 @@ def plot_error_vs_evals_full(
         plt.text(x, y_text, f"{ndv}", fontsize=8, rotation=90, va="bottom")
 
     ymin = min(adaptive_y + static_y)
+    plt.yscale("log")
     plt.ylim(bottom=max(1e-8, ymin * 0.5))
 
     plt.xlabel("Objective evaluations / XFOIL calls")

@@ -14,3 +14,4 @@ summary/
 # XFOIL files
 *.bl
 *.cp
+*.log

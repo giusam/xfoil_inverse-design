@@ -82,6 +82,118 @@ def _evaluate_objective_state(objective, a):
     return objective.eval_history[-1]
 
 
+def _adaptive_fd_step(a_value, rel_step, abs_step_floor):
+    return max(float(rel_step) * abs(float(a_value)), float(abs_step_floor))
+
+
+def _score_fd_component(
+    objective,
+    a_base,
+    idx,
+    bounds,
+    rel_step,
+    abs_step_floor,
+    base_item=None,
+):
+    a_base = np.asarray(a_base, dtype=float)
+
+    if base_item is None:
+        base_item = _evaluate_objective_state(objective, a_base)
+
+    aj = float(a_base[idx])
+    lo, hi = bounds[idx]
+    h = _adaptive_fd_step(aj, rel_step, abs_step_floor)
+
+    room_plus = max(0.0, hi - aj)
+    room_minus = max(0.0, aj - lo)
+
+    if room_plus >= h and room_minus >= h:
+        a_p = a_base.copy()
+        a_m = a_base.copy()
+        a_p[idx] += h
+        a_m[idx] -= h
+
+        item_p = _evaluate_objective_state(objective, a_p)
+        item_m = _evaluate_objective_state(objective, a_m)
+
+        if item_p.get("status") != "OK" or item_m.get("status") != "OK":
+            return {"grad": 0.0, "mode": "CENTRAL_FAIL", "h": h}
+
+        j_p = item_p.get("objective_base", item_p["objective"])
+        j_m = item_m.get("objective_base", item_m["objective"])
+        g = (j_p - j_m) / (2.0 * h)
+        return {"grad": float(g), "mode": "CENTRAL", "h": h}
+
+    if room_plus > 0.0:
+        h_fwd = min(h, room_plus)
+        a_p = a_base.copy()
+        a_p[idx] += h_fwd
+
+        item_p = _evaluate_objective_state(objective, a_p)
+
+        if base_item.get("status") != "OK" or item_p.get("status") != "OK" or h_fwd <= 0.0:
+            return {"grad": 0.0, "mode": "FWD_FAIL", "h": h_fwd}
+
+        j_0 = base_item.get("objective_base", base_item["objective"])
+        j_p = item_p.get("objective_base", item_p["objective"])
+        g = (j_p - j_0) / h_fwd
+        return {"grad": float(g), "mode": "FORWARD", "h": h_fwd}
+
+    if room_minus > 0.0:
+        h_bwd = min(h, room_minus)
+        a_m = a_base.copy()
+        a_m[idx] -= h_bwd
+
+        item_m = _evaluate_objective_state(objective, a_m)
+
+        if base_item.get("status") != "OK" or item_m.get("status") != "OK" or h_bwd <= 0.0:
+            return {"grad": 0.0, "mode": "BWD_FAIL", "h": h_bwd}
+
+        j_0 = base_item.get("objective_base", base_item["objective"])
+        j_m = item_m.get("objective_base", item_m["objective"])
+        g = (j_0 - j_m) / h_bwd
+        return {"grad": float(g), "mode": "BACKWARD", "h": h_bwd}
+
+    return {"grad": 0.0, "mode": "NO_ROOM", "h": 0.0}
+
+
+def _compute_full_objective_gradient(
+    objective,
+    a_base,
+    bounds,
+    rel_step,
+    abs_step_floor,
+    base_item=None,
+):
+    a_base = np.asarray(a_base, dtype=float)
+    ndv = len(a_base)
+
+    if base_item is None:
+        base_item = _evaluate_objective_state(objective, a_base)
+
+    grad_j = np.zeros(ndv)
+    n_fail_dirs = 0
+    fail_indices = []
+
+    for j in range(ndv):
+        out = _score_fd_component(
+            objective=objective,
+            a_base=a_base,
+            idx=j,
+            bounds=bounds,
+            rel_step=rel_step,
+            abs_step_floor=abs_step_floor,
+            base_item=base_item,
+        )
+        grad_j[j] = float(out["grad"])
+        if out["mode"] in ("CENTRAL_FAIL", "FWD_FAIL", "BWD_FAIL", "NO_ROOM"):
+            n_fail_dirs += 1
+            fail_indices.append(j)
+
+    diag = {"n_fail_dirs": n_fail_dirs, "fail_indices": fail_indices, "ndv": ndv}
+    return grad_j, diag
+
+
 def _rebuild_geometry_from_a(x, yu_init, yl_init, upper_centers, lower_centers, a):
     nu = len(upper_centers)
     nl = len(lower_centers)
@@ -101,9 +213,20 @@ def _rebuild_geometry_from_a(x, yu_init, yl_init, upper_centers, lower_centers, 
     return yu, yl
 
 
-def _compute_full_aero_gradients(objective, a_base, enabled_metric_names, h):
+def _compute_full_aero_gradients(
+    objective,
+    a_base,
+    enabled_metric_names,
+    bounds,
+    rel_step,
+    abs_step_floor,
+    base_item=None,
+):
     a_base = np.asarray(a_base, dtype=float)
     ndv = len(a_base)
+
+    if base_item is None:
+        base_item = _evaluate_objective_state(objective, a_base)
 
     grad_j = np.zeros(ndv)
     grad_metrics = {name: np.zeros(ndv) for name in enabled_metric_names}
@@ -111,30 +234,97 @@ def _compute_full_aero_gradients(objective, a_base, enabled_metric_names, h):
     fail_indices = []
 
     for j in range(ndv):
-        a_p = a_base.copy()
-        a_m = a_base.copy()
-        a_p[j] += h
-        a_m[j] -= h
+        aj = float(a_base[j])
+        lo, hi = bounds[j]
+        h = _adaptive_fd_step(aj, rel_step, abs_step_floor)
 
-        item_p = _evaluate_objective_state(objective, a_p)
-        item_m = _evaluate_objective_state(objective, a_m)
+        room_plus = max(0.0, hi - aj)
+        room_minus = max(0.0, aj - lo)
 
-        if item_p.get("status") != "OK" or item_m.get("status") != "OK":
-            n_fail_dirs += 1
-            fail_indices.append(j)
-            grad_j[j] = 0.0
+        if room_plus >= h and room_minus >= h:
+            a_p = a_base.copy()
+            a_m = a_base.copy()
+            a_p[j] += h
+            a_m[j] -= h
+
+            item_p = _evaluate_objective_state(objective, a_p)
+            item_m = _evaluate_objective_state(objective, a_m)
+
+            if item_p.get("status") != "OK" or item_m.get("status") != "OK":
+                n_fail_dirs += 1
+                fail_indices.append(j)
+                grad_j[j] = 0.0
+                for name in enabled_metric_names:
+                    grad_metrics[name][j] = 0.0
+                continue
+
+            j_p = item_p.get("objective_base", item_p["objective"])
+            j_m = item_m.get("objective_base", item_m["objective"])
+            grad_j[j] = (j_p - j_m) / (2.0 * h)
+
+            metrics_p = item_p.get("metrics", {})
+            metrics_m = item_m.get("metrics", {})
             for name in enabled_metric_names:
-                grad_metrics[name][j] = 0.0
+                grad_metrics[name][j] = (float(metrics_p[name]) - float(metrics_m[name])) / (2.0 * h)
             continue
 
-        j_p = item_p.get("objective_base", item_p["objective"])
-        j_m = item_m.get("objective_base", item_m["objective"])
-        grad_j[j] = (j_p - j_m) / (2.0 * h)
+        if room_plus > 0.0:
+            h_fwd = min(h, room_plus)
+            a_p = a_base.copy()
+            a_p[j] += h_fwd
 
-        metrics_p = item_p.get("metrics", {})
-        metrics_m = item_m.get("metrics", {})
+            item_0 = base_item
+            item_p = _evaluate_objective_state(objective, a_p)
+
+            if item_0.get("status") != "OK" or item_p.get("status") != "OK" or h_fwd <= 0.0:
+                n_fail_dirs += 1
+                fail_indices.append(j)
+                grad_j[j] = 0.0
+                for name in enabled_metric_names:
+                    grad_metrics[name][j] = 0.0
+                continue
+
+            j_0 = item_0.get("objective_base", item_0["objective"])
+            j_p = item_p.get("objective_base", item_p["objective"])
+            grad_j[j] = (j_p - j_0) / h_fwd
+
+            metrics_0 = item_0.get("metrics", {})
+            metrics_p = item_p.get("metrics", {})
+            for name in enabled_metric_names:
+                grad_metrics[name][j] = (float(metrics_p[name]) - float(metrics_0[name])) / h_fwd
+            continue
+
+        if room_minus > 0.0:
+            h_bwd = min(h, room_minus)
+            a_m = a_base.copy()
+            a_m[j] -= h_bwd
+
+            item_0 = base_item
+            item_m = _evaluate_objective_state(objective, a_m)
+
+            if item_0.get("status") != "OK" or item_m.get("status") != "OK" or h_bwd <= 0.0:
+                n_fail_dirs += 1
+                fail_indices.append(j)
+                grad_j[j] = 0.0
+                for name in enabled_metric_names:
+                    grad_metrics[name][j] = 0.0
+                continue
+
+            j_0 = item_0.get("objective_base", item_0["objective"])
+            j_m = item_m.get("objective_base", item_m["objective"])
+            grad_j[j] = (j_0 - j_m) / h_bwd
+
+            metrics_0 = item_0.get("metrics", {})
+            metrics_m = item_m.get("metrics", {})
+            for name in enabled_metric_names:
+                grad_metrics[name][j] = (float(metrics_0[name]) - float(metrics_m[name])) / h_bwd
+            continue
+
+        n_fail_dirs += 1
+        fail_indices.append(j)
+        grad_j[j] = 0.0
         for name in enabled_metric_names:
-            grad_metrics[name][j] = (float(metrics_p[name]) - float(metrics_m[name])) / (2.0 * h)
+            grad_metrics[name][j] = 0.0
 
     diag = {"n_fail_dirs": n_fail_dirs, "fail_indices": fail_indices, "ndv": ndv}
     return grad_j, grad_metrics, diag
@@ -272,22 +462,34 @@ def _solve_bounded_least_squares(grad_j, G, active_entries):
     return np.asarray(result.x, dtype=float)
 
 
-def _score_candidate_grad(objective, a_base, new_idx, h):
-    a_p = a_base.copy()
-    a_m = a_base.copy()
-    a_p[new_idx] += h
-    a_m[new_idx] -= h
+def _score_candidate_grad(
+    objective,
+    a_base,
+    new_idx,
+    bounds,
+    rel_step,
+    abs_step_floor,
+    base_item,
+):
+    grad_j, fd_diag = _compute_full_objective_gradient(
+        objective=objective,
+        a_base=a_base,
+        bounds=bounds,
+        rel_step=rel_step,
+        abs_step_floor=abs_step_floor,
+        base_item=base_item,
+    )
 
-    item_p = _evaluate_objective_state(objective, a_p)
-    item_m = _evaluate_objective_state(objective, a_m)
-
-    if item_p.get("status") != "OK" or item_m.get("status") != "OK":
-        return {"score": 0.0, "component": 0.0, "raw_grad": 0.0}
-
-    j_p = item_p.get("objective_base", item_p["objective"])
-    j_m = item_m.get("objective_base", item_m["objective"])
-    g = (j_p - j_m) / (2.0 * h)
-    return {"score": abs(g), "component": g, "raw_grad": g}
+    score = float(np.linalg.norm(grad_j))
+    gnew = float(grad_j[new_idx])
+    return {
+        "score": score,
+        "component": gnew,
+        "raw_grad": gnew,
+        "grad_j": grad_j,
+        "fd_diag": fd_diag,
+        "mode": "GRAD",
+    }
 
 
 def _score_candidate_ikkt(
@@ -299,9 +501,11 @@ def _score_candidate_ikkt(
     objective,
     a_base,
     new_idx,
-    h,
+    bounds,
+    rel_step,
+    abs_step_floor,
+    base_item,
 ):
-    base_item = _evaluate_objective_state(objective, a_base)
     if base_item.get("status") != "OK":
         z = np.zeros_like(a_base)
         return {
@@ -325,7 +529,10 @@ def _score_candidate_ikkt(
         objective=objective,
         a_base=a_base,
         enabled_metric_names=enabled_aero,
-        h=h,
+        bounds=bounds,
+        rel_step=rel_step,
+        abs_step_floor=abs_step_floor,
+        base_item=base_item,
     )
 
     yu, yl = _rebuild_geometry_from_a(x, yu_init, yl_init, upper_centers, lower_centers, a_base)
@@ -343,10 +550,11 @@ def _score_candidate_ikkt(
     )
 
     if G is None or len(active_entries) == 0:
-        g = float(grad_j[new_idx])
+        gnew = float(grad_j[new_idx])
+        score = float(np.linalg.norm(grad_j))
         return {
-            "score": abs(g),
-            "component": g,
+            "score": score,
+            "component": gnew,
             "active_entries": [],
             "lam": np.zeros(0),
             "r": grad_j.copy(),
@@ -357,8 +565,9 @@ def _score_candidate_ikkt(
 
     lam = _solve_bounded_least_squares(grad_j, G, active_entries)
     r = grad_j - G @ lam
+    score = float(np.linalg.norm(r))
     return {
-        "score": abs(float(r[new_idx])),
+        "score": score,
         "component": float(r[new_idx]),
         "active_entries": active_entries,
         "lam": lam,
@@ -380,6 +589,7 @@ def score_candidate(
     candidate,
     current_best_error,
     workdir,
+    indicator,
 ):
     side, xc, new_upper, new_lower, a_base, new_idx = _build_extended_space(
         active_upper=active_upper,
@@ -401,8 +611,14 @@ def score_candidate(
         xc=xc,
     )
 
-    h = SETTINGS["optimization"]["adaptive"]["fd_step"]
-    indicator = str(SETTINGS["optimization"]["adaptive"].get("indicator", "GRAD")).upper()
+    indicator = str(indicator).upper()
+
+    bmin, bmax = SETTINGS["optimization"]["bounds"]
+    bounds = [(bmin, bmax)] * len(a_base)
+    rel_step = SETTINGS["optimization"]["fd_rel_step"]
+    abs_step_floor = SETTINGS["optimization"]["fd_abs_step_floor"]
+
+    base_item = _evaluate_objective_state(objective, a_base)
 
     if indicator == "IKKT":
         out = _score_candidate_ikkt(
@@ -414,7 +630,10 @@ def score_candidate(
             objective=objective,
             a_base=a_base,
             new_idx=new_idx,
-            h=h,
+            bounds=bounds,
+            rel_step=rel_step,
+            abs_step_floor=abs_step_floor,
+            base_item=base_item,
         )
         active_names = [
             f"{e['name']}@{e['x']:.3f}" if e["name"] == "thickness_stations" else e["name"]
@@ -424,8 +643,8 @@ def score_candidate(
         msg = (
             f"SCORE[{indicator}] side={side} candidate={xc:.6f}  "
             f"mode={out['mode']}  "
+            f"r_norm={out['score']:.6e}  "
             f"r_new={out['component']:.6e}  "
-            f"score={out['score']:.6e}  "
             f"gnew={out['grad_j'][new_idx]:.6e}  "
             f"n_active={len(out['active_entries'])}  "
             f"evals={objective.eval_counter['k']}"
@@ -435,16 +654,6 @@ def score_candidate(
         if len(out["active_entries"]) > 0:
             print(f"  active = {active_names}")
             print(f"  lambda = {np.array2string(out['lam'], precision=4, suppress_small=False)}")
-
-        with open("ikkt_score.log", "a", encoding="utf-8") as f:
-            f.write(msg + "\n")
-            if len(out["active_entries"]) > 0:
-                f.write(f"  active = {active_names}\n")
-                f.write(
-                    "  lambda = "
-                    + np.array2string(out["lam"], precision=4, suppress_small=False)
-                    + "\n"
-                )
 
         return {
             "side": side,
@@ -459,11 +668,22 @@ def score_candidate(
             "mode": out["mode"],
         }
 
-    out = _score_candidate_grad(objective=objective, a_base=a_base, new_idx=new_idx, h=h)
+    out = _score_candidate_grad(
+        objective=objective,
+        a_base=a_base,
+        new_idx=new_idx,
+        bounds=bounds,
+        rel_step=rel_step,
+        abs_step_floor=abs_step_floor,
+        base_item=base_item,
+    )
 
     print(
         f"SCORE[{indicator}] side={side} candidate={xc:.6f}  "
-        f"g={out['component']:.6e}  score={out['score']:.6e}  evals={objective.eval_counter['k']}"
+        f"g_norm={out['score']:.6e}  "
+        f"g_new={out['component']:.6e}  "
+        f"n_fail_dirs={out['fd_diag']['n_fail_dirs']}  "
+        f"evals={objective.eval_counter['k']}"
     )
 
     return {
@@ -484,7 +704,7 @@ def _print_candidate_diagnostics(scored, topk=12):
     if len(scored) == 0:
         return
 
-    print("\n===== CANDIDATE RANKING (TOP) =====")
+    print("===== CANDIDATE RANKING (TOP) =====")
     for i, item in enumerate(scored[:topk], start=1):
         lam_str = np.array2string(item["lambda"], precision=3, suppress_small=False) if len(item["lambda"]) > 0 else "[]"
         print(
@@ -498,43 +718,36 @@ def _print_candidate_diagnostics(scored, topk=12):
             f"lambda={lam_str}"
         )
 
-    print("\n===== SAME-X PAIRS =====")
+    print("===== SAME-X PAIRS =====")
 
-    with open("ikkt_pairs.log", "a", encoding="utf-8") as f:
-        f.write("\n===== SAME-X PAIRS =====\n")
+    grouped = {}
+    for item in scored:
+        key = round(float(item["x"]), 6)
+        grouped.setdefault(key, []).append(item)
 
-        grouped = {}
-        for item in scored:
-            key = round(float(item["x"]), 6)
-            grouped.setdefault(key, []).append(item)
+    found_pair = False
+    for key in sorted(grouped):
+        items = grouped[key]
+        if len(items) < 2:
+            continue
 
-        found_pair = False
-        for key in sorted(grouped):
-            items = grouped[key]
-            if len(items) < 2:
-                continue
+        found_pair = True
+        items = sorted(items, key=lambda z: z["side"])
 
-            found_pair = True
-            items = sorted(items, key=lambda z: z["side"])
+        line = f"x={key:.6f}"
+        print(line)
 
-            line = f"x={key:.6f}"
+        for item in items:
+            line = (
+                f"  side={item['side']:<5s} "
+                f"score={item['score']:.6e}  "
+                f"component={item['component']:.6e}  "
+                f"raw={item['raw_grad']:.6e}"
+            )
             print(line)
-            f.write(line + "\n")
 
-            for item in items:
-                line = (
-                    f"  side={item['side']:<5s} "
-                    f"score={item['score']:.6e}  "
-                    f"component={item['component']:.6e}  "
-                    f"raw={item['raw_grad']:.6e}"
-                )
-                print(line)
-                f.write(line + "\n")
-
-        if not found_pair:
-            msg = "No same-x upper/lower pairs in current candidate set."
-            print(msg)
-            f.write(msg + "\n")
+    if not found_pair:
+        print("No same-x upper/lower pairs in current candidate set.")
 
 
 def run_adaptive_strategy(
@@ -544,6 +757,7 @@ def run_adaptive_strategy(
     cp_target,
     initial_error,
     workdir,
+    indicator,
 ):
     opt_ad = SETTINGS["optimization"]["adaptive"]
 
@@ -653,6 +867,7 @@ def run_adaptive_strategy(
                 candidate=cand,
                 current_best_error=current_best_error,
                 workdir=Path(workdir) / "adaptive_candidate_scoring",
+                indicator=indicator,
             )
             n_scoring_evals_total += info["n_evals"]
             n_xfoil_calls_total += info["n_evals"]
@@ -684,7 +899,7 @@ def run_adaptive_strategy(
 
         chosen = scored[:n_add]
 
-        print("\n===== ADAPTIVE REFINE =====")
+        print("===== ADAPTIVE REFINE =====")
         print(f"current ndv       = {current_ndv}")
         print(f"growth ratio      = {SETTINGS['optimization']['adaptive']['growth_ratio']:.6f}")
         print(f"current best err  = {current_best_error:.6e}")
