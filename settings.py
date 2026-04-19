@@ -18,6 +18,11 @@ SETTINGS = {
         "working_dir": Path("run_debug"),
     },
 
+    "snapshots": {
+        "enabled": True,
+        "dir_name": "snapshots",
+    },
+
     "geom": {
         "n_points": 201,
         "thickness": 0.12,

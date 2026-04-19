@@ -1,17 +1,11 @@
-# Python
-__pycache__/
-*.pyc
+# ignora tutto
+*
 
-# Output e debug
-run_debug/
-summary/
+# ma consenti a Git di attraversare le cartelle
+!*/
 
-# Log e dati
-*.log
-*.dat
-*.txt
+# tieni solo gli script Python
+!*.py
 
-# XFOIL files
-*.bl
-*.cp
-*.log
+# tieni questo file
+!.gitignore

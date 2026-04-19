@@ -13,6 +13,59 @@ from adaptive_utils import (
 from adaptive_scoring import score_candidate
 from adaptive_pred import _prepare_pred_level_context
 
+
+def _save_level_snapshot(
+    x,
+    yu_init,
+    yl_init,
+    cp_target,
+    adaptive_out,
+    label,
+    workdir,
+):
+    snapshots_cfg = SETTINGS.get("snapshots", {})
+    if not bool(snapshots_cfg.get("enabled", False)):
+        return None
+
+    snapshot_dir = Path(workdir) / str(snapshots_cfg.get("dir_name", "snapshots"))
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    ndv_total = int(adaptive_out["ndv_total"])
+    snapshot_path = snapshot_dir / f"level_{ndv_total:03d}.npz"
+
+    payload = {
+        "ndv_total": np.asarray(ndv_total),
+        "x": np.asarray(x, dtype=float),
+        "yu_init": np.asarray(yu_init, dtype=float),
+        "yl_init": np.asarray(yl_init, dtype=float),
+        "upper_centers": np.asarray(adaptive_out["upper_centers"], dtype=float),
+        "lower_centers": np.asarray(adaptive_out["lower_centers"], dtype=float),
+        "a_opt": np.asarray(adaptive_out["a_opt"], dtype=float),
+        "err_opt": np.asarray(float(adaptive_out["err_opt"])),
+        "yu_opt": np.asarray(adaptive_out["yu_opt"], dtype=float),
+        "yl_opt": np.asarray(adaptive_out["yl_opt"], dtype=float),
+        "cp_target_upper_x": np.asarray(cp_target["upper"]["x"], dtype=float),
+        "cp_target_upper_cp": np.asarray(cp_target["upper"]["cp"], dtype=float),
+        "cp_target_lower_x": np.asarray(cp_target["lower"]["x"], dtype=float),
+        "cp_target_lower_cp": np.asarray(cp_target["lower"]["cp"], dtype=float),
+        "cp_opt_upper_x": np.asarray(adaptive_out["cp_opt"]["upper"]["x"], dtype=float),
+        "cp_opt_upper_cp": np.asarray(adaptive_out["cp_opt"]["upper"]["cp"], dtype=float),
+        "cp_opt_lower_x": np.asarray(adaptive_out["cp_opt"]["lower"]["x"], dtype=float),
+        "cp_opt_lower_cp": np.asarray(adaptive_out["cp_opt"]["lower"]["cp"], dtype=float),
+        "label": np.asarray(str(label)),
+    }
+
+    for metric_name in ("CL", "CD", "CM"):
+        target_value = SETTINGS.get("constraints", {}).get(metric_name, {}).get("target")
+        if target_value is None:
+            payload[f"constraint_{metric_name}_target"] = np.asarray(np.nan)
+        else:
+            payload[f"constraint_{metric_name}_target"] = np.asarray(float(target_value))
+
+    np.savez(snapshot_path, **payload)
+    return snapshot_path
+
+
 def _print_candidate_diagnostics(scored, topk=12):
     if len(scored) == 0:
         return
@@ -98,6 +151,15 @@ def run_adaptive_strategy(
         label="adaptive_level_0",
         current_best_error=current_best_error,
         workdir=Path(workdir) / "adaptive",
+    )
+    _save_level_snapshot(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        cp_target=cp_target,
+        adaptive_out=adaptive_out,
+        label="adaptive_level_0",
+        workdir=workdir,
     )
 
     current_best_error = adaptive_out["err_opt"]
@@ -264,6 +326,15 @@ def run_adaptive_strategy(
             label=level_label,
             current_best_error=current_best_error,
             workdir=Path(workdir) / "adaptive",
+        )
+        _save_level_snapshot(
+            x=x,
+            yu_init=yu_init,
+            yl_init=yl_init,
+            cp_target=cp_target,
+            adaptive_out=adaptive_out,
+            label=level_label,
+            workdir=workdir,
         )
 
         current_best_error = adaptive_out["err_opt"]

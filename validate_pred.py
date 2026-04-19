@@ -5,104 +5,93 @@ import shutil
 import numpy as np
 
 from settings import SETTINGS
-from geometry import build_naca0012_surfaces, build_random_initial_geometry, write_dat
-from xfoil_wrapper import clean_workdir, run_xfoil
-from cp_utils import split_upper_lower_cp_from_x
-from objective import total_cp_error
 from optimization import optimize_for_centers
-from adaptive_utils import (
-    build_side_specific_initial_centers,
-    get_midpoint_candidates,
-    lift_a_to_new_side_centers,
-    _compute_adaptive_nadd,
-)
+from adaptive_utils import get_midpoint_candidates, lift_a_to_new_side_centers
 from adaptive_scoring import score_candidate
 from adaptive_pred import _prepare_pred_level_context
 from adaptive_candidate import _build_extended_space
 
 
-# =========================
-# USER SETTINGS FOR TEST
-# =========================
-SEED = 0
-VALIDATE_AT_NDV = 7          # example: 6 validates the first candidate expansion
-STATE_SELECTOR = "GRAD"      # indicator used to reconstruct the state if VALIDATE_AT_NDV > n0
+BASE_DIR = Path(__file__).resolve().parent
+SNAP_ROOT = BASE_DIR / SETTINGS.get("snapshots", {}).get("dir_name", "snapshots")
+
+SNAP_SEED = 0
+SNAP_METHOD = "adapt_grad"   # "adapt_grad" | "adapt_ikkt" | "adapt_pred"
+SNAP_LEVEL = 1
+
+SNAPSHOT_PATH = SNAP_ROOT / f"seed_{SNAP_SEED}" / SNAP_METHOD / f"level_{SNAP_LEVEL:03d}.npz"
+
+CANDIDATES_TO_TEST = None
 WRITE_CSV = True
 
+def _restore_snapshot_constraint_targets(data):
+    for metric_name in ("CL", "CD", "CM"):
+        key = f"constraint_{metric_name}_target"
+        if key not in data.files:
+            continue
 
-def _build_problem(seed, workdir):
-    x, yu_target, yl_target = build_naca0012_surfaces(
-        n_points=SETTINGS["geom"]["n_points"],
-        thickness=SETTINGS["geom"]["thickness"],
-    )
+        value = float(np.asarray(data[key]).item())
+        if np.isnan(value):
+            continue
 
-    target_dat = Path(workdir) / "target_airfoil.dat"
-    write_dat(target_dat, x, yu_target, yl_target, name="TARGET_NACA0012")
+        if metric_name in SETTINGS.get("constraints", {}):
+            SETTINGS["constraints"][metric_name]["target"] = value
 
-    target_res = run_xfoil(
-        airfoil_dat=target_dat,
-        alpha_deg=SETTINGS["xfoil"]["alpha"],
-        reynolds=SETTINGS["xfoil"]["Re"],
-        xfoil_iter=SETTINGS["xfoil"]["xfoil_iter"],
-        timeout=SETTINGS["xfoil"]["timeout"],
-        working_dir=Path(workdir) / "target_run",
-    )
-    if not target_res["success"]:
-        print(target_res["stdout"])
-        print(target_res["stderr"])
-        raise RuntimeError("Target XFOIL run failed.")
 
-    cp_target = split_upper_lower_cp_from_x(
-        target_res["cp_data"]["x"],
-        target_res["cp_data"]["cp"],
-    )
+def _load_level_snapshot(path):
+    path = Path(path)
+    required_fields = [
+        "ndv_total",
+        "x",
+        "yu_init",
+        "yl_init",
+        "upper_centers",
+        "lower_centers",
+        "a_opt",
+        "err_opt",
+        "yu_opt",
+        "yl_opt",
+        "cp_target_upper_x",
+        "cp_target_upper_cp",
+        "cp_target_lower_x",
+        "cp_target_lower_cp",
+        "cp_opt_upper_x",
+        "cp_opt_upper_cp",
+        "cp_opt_lower_x",
+        "cp_opt_lower_cp",
+        "label",
+    ]
 
-    init_geom = build_random_initial_geometry(
-        x=x,
-        yu_target=yu_target,
-        yl_target=yl_target,
-        seed=seed,
-        amp=SETTINGS["initial_shape"]["random_amp"],
-        order=SETTINGS["initial_shape"]["bernstein_order"],
-    )
+    with np.load(path, allow_pickle=False) as data:
+        missing = [name for name in required_fields if name not in data.files]
+        if missing:
+            missing_str = ", ".join(missing)
+            raise KeyError(f"Snapshot {path} is missing required fields: {missing_str}")
 
-    yu_init = init_geom["yu_init"]
-    yl_init = init_geom["yl_init"]
+        _restore_snapshot_constraint_targets(data)
 
-    init_dat = Path(workdir) / "initial_airfoil.dat"
-    write_dat(init_dat, x, yu_init, yl_init, name="INITIAL_RANDOM")
-
-    init_res = run_xfoil(
-        airfoil_dat=init_dat,
-        alpha_deg=SETTINGS["xfoil"]["alpha"],
-        reynolds=SETTINGS["xfoil"]["Re"],
-        xfoil_iter=SETTINGS["xfoil"]["xfoil_iter"],
-        timeout=SETTINGS["xfoil"]["timeout"],
-        working_dir=Path(workdir) / "initial_run",
-    )
-    if not init_res["success"]:
-        print(init_res["stdout"])
-        print(init_res["stderr"])
-        raise RuntimeError("Initial XFOIL run failed.")
-
-    cp_init = split_upper_lower_cp_from_x(
-        init_res["cp_data"]["x"],
-        init_res["cp_data"]["cp"],
-    )
-    err_init = total_cp_error(cp_target, cp_init)
-
-    if SETTINGS.get("constraints", {}).get("CL", {}).get("enabled", False):
-        SETTINGS["constraints"]["CL"]["target"] = float(target_res["polar"]["CL"])
-
-    return {
-        "x": x,
-        "yu_init": yu_init,
-        "yl_init": yl_init,
-        "cp_target": cp_target,
-        "err_init": err_init,
-        "target_res": target_res,
-        "init_res": init_res,
-    }
+        return {
+            "snapshot_path": path,
+            "x": np.array(data["x"], dtype=float, copy=True),
+            "yu_init": np.array(data["yu_init"], dtype=float, copy=True),
+            "yl_init": np.array(data["yl_init"], dtype=float, copy=True),
+            "cp_target": {
+                "upper": {
+                    "x": np.array(data["cp_target_upper_x"], dtype=float, copy=True),
+                    "cp": np.array(data["cp_target_upper_cp"], dtype=float, copy=True),
+                },
+                "lower": {
+                    "x": np.array(data["cp_target_lower_x"], dtype=float, copy=True),
+                    "cp": np.array(data["cp_target_lower_cp"], dtype=float, copy=True),
+                },
+            },
+            "upper_centers": np.array(data["upper_centers"], dtype=float, copy=True).tolist(),
+            "lower_centers": np.array(data["lower_centers"], dtype=float, copy=True).tolist(),
+            "a_opt": np.array(data["a_opt"], dtype=float, copy=True),
+            "err_opt": float(np.asarray(data["err_opt"]).item()),
+            "ndv_total": int(np.asarray(data["ndv_total"]).item()),
+            "label": str(np.asarray(data["label"]).item()),
+        }
 
 
 def _build_candidates(upper_centers, lower_centers):
@@ -110,153 +99,42 @@ def _build_candidates(upper_centers, lower_centers):
     cand_lower_raw = get_midpoint_candidates(lower_centers)
 
     candidates = []
-    for c in cand_upper_raw:
-        candidates.append({"side": "UPPER", "x": float(c["x"]), "interval_id": c["interval_id"]})
-    for c in cand_lower_raw:
-        candidates.append({"side": "LOWER", "x": float(c["x"]), "interval_id": c["interval_id"]})
+    for cand in cand_upper_raw:
+        candidates.append(
+            {
+                "side": "UPPER",
+                "x": float(cand["x"]),
+                "interval_id": cand["interval_id"],
+            }
+        )
+    for cand in cand_lower_raw:
+        candidates.append(
+            {
+                "side": "LOWER",
+                "x": float(cand["x"]),
+                "interval_id": cand["interval_id"],
+            }
+        )
     return candidates
 
 
-def _prepare_state_at_ndv(problem, target_ndv, selector_indicator, workdir):
-    x = problem["x"]
-    yu_init = problem["yu_init"]
-    yl_init = problem["yl_init"]
-    cp_target = problem["cp_target"]
-    current_best_error = float(problem["err_init"])
-
-    upper_centers, lower_centers = build_side_specific_initial_centers(
-        SETTINGS["optimization"]["adaptive"]["n0"]
-    )
-    a0 = np.zeros(len(upper_centers) + len(lower_centers))
-
-    adaptive_out = optimize_for_centers(
-        x=x,
-        yu_init=yu_init,
-        yl_init=yl_init,
-        cp_target=cp_target,
-        upper_centers=upper_centers,
-        lower_centers=lower_centers,
-        a0=a0,
-        label="validate_level_0",
-        current_best_error=current_best_error,
-        workdir=Path(workdir) / "levels",
-    )
-    current_best_error = adaptive_out["err_opt"]
-
-    if target_ndv < adaptive_out["ndv_total"]:
-        raise ValueError(
-            f"Requested VALIDATE_AT_NDV={target_ndv} but initial adaptive level has ndv={adaptive_out['ndv_total']}."
-        )
-
-    while adaptive_out["ndv_total"] < target_ndv:
-        candidates = _build_candidates(upper_centers, lower_centers)
-        if len(candidates) == 0:
-            break
-
-        pred_context = None
-        if str(selector_indicator).upper() == "PRED":
-            pred_context = _prepare_pred_level_context(
-                x=x,
-                yu_init=yu_init,
-                yl_init=yl_init,
-                cp_target=cp_target,
-                upper_centers=upper_centers,
-                lower_centers=lower_centers,
-                a_opt=np.asarray(adaptive_out["a_opt"], dtype=float),
-                current_best_error=current_best_error,
-                workdir=Path(workdir) / "selector_pred_context",
-            )
-
-        scored = []
-        for cand in candidates:
-            info = score_candidate(
-                x=x,
-                yu_init=yu_init,
-                yl_init=yl_init,
-                cp_target=cp_target,
-                active_upper=upper_centers,
-                active_lower=lower_centers,
-                active_a=adaptive_out["a_opt"],
-                candidate=cand,
-                current_best_error=current_best_error,
-                workdir=Path(workdir) / "selector_scoring",
-                indicator=selector_indicator,
-                pred_context=pred_context,
-            )
-            scored.append(
-                {
-                    "side": info["side"],
-                    "x": info["x"],
-                    "interval_id": cand["interval_id"],
-                    "score": info["score"],
-                }
-            )
-
-        scored.sort(key=lambda item: (-item["score"], item["x"]))
-
-        current_ndv = len(upper_centers) + len(lower_centers)
-        n_remaining = target_ndv - current_ndv
-        n_add = _compute_adaptive_nadd(current_ndv, len(scored))
-        n_add = min(n_add, n_remaining)
-
-        if n_add <= 0:
-            break
-
-        chosen = scored[:n_add]
-
-        new_upper = sorted(list(upper_centers))
-        new_lower = sorted(list(lower_centers))
-
-        for cand in chosen:
-            if cand["side"] == "UPPER":
-                new_upper.append(float(cand["x"]))
-            else:
-                new_lower.append(float(cand["x"]))
-
-        new_upper = sorted(set(new_upper))
-        new_lower = sorted(set(new_lower))
-
-        new_a0 = lift_a_to_new_side_centers(
-            old_upper=upper_centers,
-            old_lower=lower_centers,
-            old_a=adaptive_out["a_opt"],
-            new_upper=new_upper,
-            new_lower=new_lower,
-        )
-
-        level_label = f"validate_level_{len(new_upper) + len(new_lower)}"
-
-        adaptive_out = optimize_for_centers(
-            x=x,
-            yu_init=yu_init,
-            yl_init=yl_init,
-            cp_target=cp_target,
-            upper_centers=new_upper,
-            lower_centers=new_lower,
-            a0=new_a0,
-            label=level_label,
-            current_best_error=current_best_error,
-            workdir=Path(workdir) / "levels",
-        )
-
-        current_best_error = adaptive_out["err_opt"]
-        upper_centers = new_upper
-        lower_centers = new_lower
-
-    return {
-        "x": x,
-        "yu_init": yu_init,
-        "yl_init": yl_init,
-        "cp_target": cp_target,
-        "upper_centers": list(upper_centers),
-        "lower_centers": list(lower_centers),
-        "a_opt": np.asarray(adaptive_out["a_opt"], dtype=float).copy(),
-        "err_opt": float(adaptive_out["err_opt"]),
-        "adaptive_out": adaptive_out,
-    }
+def _find_candidate(candidates, side, x_target, tol=1.0e-12):
+    side = str(side).upper()
+    for cand in candidates:
+        if str(cand["side"]).upper() != side:
+            continue
+        if abs(float(cand["x"]) - float(x_target)) <= tol:
+            return cand
+    raise ValueError(f"Candidate not found: side={side}, x={x_target}")
 
 
-def _validate_pred_for_state(state, workdir):
+def _select_candidates(candidates, selected):
+    if selected is None:
+        return list(candidates)
+    return [_find_candidate(candidates, side, x_val) for side, x_val in selected]
+
+
+def _validate_pred_for_state(state, candidates, workdir):
     x = state["x"]
     yu_init = state["yu_init"]
     yl_init = state["yl_init"]
@@ -265,10 +143,6 @@ def _validate_pred_for_state(state, workdir):
     lower_centers = state["lower_centers"]
     a_opt = state["a_opt"]
     err_current = float(state["err_opt"])
-
-    candidates = _build_candidates(upper_centers, lower_centers)
-    if len(candidates) == 0:
-        raise RuntimeError("No candidates available at this level.")
 
     pred_context = _prepare_pred_level_context(
         x=x,
@@ -362,11 +236,11 @@ def _validate_pred_for_state(state, workdir):
             f"delta_real={row['delta_real']:.6e}"
         )
 
-    pred_sorted = sorted(rows, key=lambda z: (-z["delta_pred"], z["x"]))
-    real_sorted = sorted(rows, key=lambda z: (-z["delta_real"], z["x"]))
+    pred_sorted = sorted(rows, key=lambda item: (-item["delta_pred"], item["x"]))
+    real_sorted = sorted(rows, key=lambda item: (-item["delta_real"], item["x"]))
 
-    pred_rank = {(r["side"], round(r["x"], 6)): i + 1 for i, r in enumerate(pred_sorted)}
-    real_rank = {(r["side"], round(r["x"], 6)): i + 1 for i, r in enumerate(real_sorted)}
+    pred_rank = {(row["side"], round(row["x"], 6)): idx + 1 for idx, row in enumerate(pred_sorted)}
+    real_rank = {(row["side"], round(row["x"], 6)): idx + 1 for idx, row in enumerate(real_sorted)}
 
     for row in rows:
         key = (row["side"], round(row["x"], 6))
@@ -377,7 +251,7 @@ def _validate_pred_for_state(state, workdir):
         else:
             row["rho"] = np.nan
 
-    rows.sort(key=lambda z: z["rank_pred"])
+    rows.sort(key=lambda item: item["rank_pred"])
 
     print("\n===== PRED VALIDATION SUMMARY =====")
     print("rank_pred | rank_real | side  | x        | delta_pred      | delta_real      | rho")
@@ -394,39 +268,35 @@ def _validate_pred_for_state(state, workdir):
 
     return rows
 
-
 def main():
-    run_dir = Path("run_validate_pred")
+    if not SNAPSHOT_PATH.exists():
+        raise FileNotFoundError(f"Snapshot file not found: {SNAPSHOT_PATH}")
+
+    snapshot = _load_level_snapshot(SNAPSHOT_PATH)
+    run_dir = BASE_DIR / "run_validate_pred" / snapshot["snapshot_path"].stem
+
     if run_dir.exists():
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    SETTINGS["initial_shape"]["random_seed"] = SEED
-    SETTINGS["run"]["seed"] = SEED
-    SETTINGS["xfoil"]["working_dir"] = run_dir / f"seed_{SEED}"
-    clean_workdir(SETTINGS["xfoil"]["working_dir"])
-
-    problem = _build_problem(SEED, SETTINGS["xfoil"]["working_dir"])
-
-    state = _prepare_state_at_ndv(
-        problem=problem,
-        target_ndv=VALIDATE_AT_NDV,
-        selector_indicator=STATE_SELECTOR,
-        workdir=run_dir / "state_build",
-    )
-
     print("\n===== STATE TO VALIDATE =====")
-    print(f"seed           = {SEED}")
-    print(f"validate_ndv   = {VALIDATE_AT_NDV}")
-    print(f"state_selector = {STATE_SELECTOR}")
-    print(f"current_err    = {state['err_opt']:.6e}")
-    print(f"upper_centers  = {state['upper_centers']}")
-    print(f"lower_centers  = {state['lower_centers']}")
+    print(f"snapshot       = {snapshot['snapshot_path']}")
+    print(f"label          = {snapshot['label']}")
+    print(f"validate_ndv   = {snapshot['ndv_total']}")
+    print(f"current_err    = {snapshot['err_opt']:.6e}")
+    print(f"upper_centers  = {snapshot['upper_centers']}")
+    print(f"lower_centers  = {snapshot['lower_centers']}")
 
-    rows = _validate_pred_for_state(state, run_dir / "validation")
+    candidates = _build_candidates(snapshot["upper_centers"], snapshot["lower_centers"])
+    test_candidates = _select_candidates(candidates, CANDIDATES_TO_TEST)
+
+    if len(test_candidates) == 0:
+        raise RuntimeError("No candidates available for the selected snapshot.")
+
+    rows = _validate_pred_for_state(snapshot, test_candidates, run_dir / "validation")
 
     if WRITE_CSV:
-        csv_path = run_dir / f"pred_validation_ndv_{VALIDATE_AT_NDV}.csv"
+        csv_path = run_dir / f"pred_validation_{snapshot['snapshot_path'].stem}.csv"
         fieldnames = [
             "side",
             "x",

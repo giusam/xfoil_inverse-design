@@ -70,15 +70,24 @@ def _get_active_adaptive_modes():
 
 
 def main():
+    base_dir = Path(__file__).resolve().parent
+
     for pattern in ("a_history_seed_*.dat", "grad_history_seed_*.dat"):
-        for p in Path(".").glob(pattern):
+        for p in base_dir.glob(pattern):
             try:
                 p.unlink()
             except OSError:
                 pass
 
     results = []
-    base_workdir = Path("run_debug")
+    base_workdir = base_dir / "run_debug"
+
+    snapshots_enabled = bool(SETTINGS.get("snapshots", {}).get("enabled", False))
+    snap_root = base_dir / SETTINGS.get("snapshots", {}).get("dir_name", "snap")
+
+    if snapshots_enabled:
+        snap_root.mkdir(parents=True, exist_ok=True)
+
     if base_workdir.exists():
         shutil.rmtree(base_workdir)
     base_workdir.mkdir(parents=True, exist_ok=True)
@@ -88,7 +97,9 @@ def main():
     adaptive_modes = _get_active_adaptive_modes()
 
     if not do_static and len(adaptive_modes) == 0:
-        raise RuntimeError("Activate at least one among run.do_static, run.do_adaptive_grad, run.do_adaptive_ikkt.")
+        raise RuntimeError(
+            "Activate at least one among run.do_static, run.do_adaptive_grad, run.do_adaptive_ikkt."
+        )
 
     for seed in range(n_seeds):
         print("==============================")
@@ -207,6 +218,7 @@ def main():
             static_out = _static_placeholder(err_init, init_res)
 
         adaptive_runs = {}
+        snapshot_dirs_to_move = []
 
         for mode in adaptive_modes:
             mode_key = f"adapt_{mode.lower()}"
@@ -220,6 +232,10 @@ def main():
                 workdir=Path(workdir) / mode_key,
                 indicator=mode,
             )
+
+            if snapshots_enabled:
+                local_snapshot_dir = Path(workdir) / mode_key / SETTINGS["snapshots"]["dir_name"]
+                snapshot_dirs_to_move.append((mode_key, local_snapshot_dir))
 
         print_seed_recap(
             seed=seed,
@@ -256,6 +272,33 @@ def main():
                 adaptive_runs=adaptive_runs,
             )
         )
+
+        if snapshots_enabled:
+            for mode_key, local_snapshot_dir in snapshot_dirs_to_move:
+                if not local_snapshot_dir.exists():
+                    print(f"[warning] snapshot dir not found: {local_snapshot_dir}")
+                    continue
+
+                persistent_snapshot_dir = snap_root / f"seed_{seed}" / mode_key
+                persistent_snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+                for old_file in persistent_snapshot_dir.glob("*.npz"):
+                    try:
+                        old_file.unlink()
+                    except OSError:
+                        pass
+
+                npz_files = sorted(local_snapshot_dir.rglob("*.npz"))
+
+                if len(npz_files) == 0:
+                    print(f"[warning] no npz snapshots found in: {local_snapshot_dir}")
+                    continue
+
+                for idx, src_npz in enumerate(npz_files):
+                    dst_npz = persistent_snapshot_dir / f"level_{idx:03d}.npz"
+                    shutil.copy2(src_npz, dst_npz)
+
+                print(f"Snapshots written in: {persistent_snapshot_dir}")
 
         cleanup_debug_files(workdir)
 
