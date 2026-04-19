@@ -64,6 +64,8 @@ def _get_active_adaptive_modes():
         modes.append("GRAD")
     if bool(run_cfg.get("do_adaptive_ikkt", False)):
         modes.append("IKKT")
+    if bool(run_cfg.get("do_adaptive_pred", False)):
+        modes.append("PRED")
     return modes
 
 

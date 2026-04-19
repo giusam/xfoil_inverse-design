@@ -8,7 +8,7 @@ from geometry import apply_hicks_henne_deformation, write_dat
 from xfoil_wrapper import run_xfoil
 from cp_utils import split_upper_lower_cp_from_x
 from objective import make_objective, total_cp_error
-from constraints import build_slsqp_geometric_constraints
+from constraints import build_slsqp_all_constraints
 
 
 def _status_of_last_eval(objective):
@@ -137,7 +137,7 @@ def optimize_for_centers(
         current_best_error=current_best_error,
     )
 
-    geometric_constraints = build_slsqp_geometric_constraints(
+    all_constraints = build_slsqp_all_constraints(
         settings_constraints=SETTINGS.get("constraints", {}),
         x=x,
         yu_init=yu_init,
@@ -145,6 +145,11 @@ def optimize_for_centers(
         upper_centers=upper_centers,
         lower_centers=lower_centers,
         hh_power=hh_power,
+        alpha_deg=SETTINGS["xfoil"]["alpha"],
+        reynolds=SETTINGS["xfoil"]["Re"],
+        xfoil_iter=SETTINGS["xfoil"]["xfoil_iter"],
+        timeout=SETTINGS["xfoil"]["timeout"],
+        working_dir=Path(workdir) / f"{label}_constraints",
     )
 
     bmin, bmax = SETTINGS["optimization"]["bounds"]
@@ -184,8 +189,8 @@ def optimize_for_centers(
     print(f"\n===== OBJECTIVE CHECK AT a0 ({label}) =====")
     j0 = objective(a0)
     print(f"Initial objective value at a0 = {j0:.6e}")
-    print(f"Dynamic penalty value         = {objective.get_penalty():.6e}")
-    print(f"Geometric SLSQP constraints   = {len(geometric_constraints)}")
+    print(f"Failure penalty value         = {objective.get_penalty():.6e}")
+    print(f"SLSQP constraints             = {len(all_constraints)}")
     print("Jacobian mode                 = EXPLICIT_FD")
     print(f"jac_rel_step                  = {jac_rel_step:.6e}")
     print(f"jac_abs_step_floor            = {jac_abs_step_floor:.6e}")
@@ -197,7 +202,7 @@ def optimize_for_centers(
         method="SLSQP",
         jac=jac_explicit,
         bounds=bounds,
-        constraints=geometric_constraints,
+        constraints=all_constraints,
         options={
             "maxiter": SETTINGS["optimization"]["maxiter"],
             "ftol": SETTINGS["optimization"]["ftol"],
@@ -273,5 +278,6 @@ def optimize_for_centers(
         "objective_history": list(objective.eval_history),
         "ndv_total": len(upper_centers) + len(lower_centers),
         "penalty_value": objective.get_penalty(),
-        "n_geometric_constraints": len(geometric_constraints),
+        "n_slsqp_constraints": len(all_constraints),
+        "n_geometric_constraints": len(all_constraints),
     }

@@ -1,5 +1,6 @@
-import numpy as np
+from pathlib import Path
 
+import numpy as np
 
 AERODYNAMIC_CONSTRAINT_NAMES = {"CL", "CD", "CM"}
 GEOMETRIC_CONSTRAINT_NAMES = {"tmax", "area", "thickness_stations"}
@@ -113,7 +114,6 @@ def split_constraints_by_domain(settings_constraints):
         elif name in GEOMETRIC_CONSTRAINT_NAMES:
             geom[name] = spec
         else:
-            # fallback conservativo: tutto cio' che non e' noto resta nella penalty
             aero[name] = spec
 
     return aero, geom
@@ -136,18 +136,6 @@ def get_constraint_value(name, spec, metrics, x, yu, yl, station=None):
 
 
 def build_signed_constraint_entry(name, spec, metrics, x, yu, yl, tol_active=0.0):
-    """
-    Costruisce una rappresentazione standardizzata di un singolo vincolo
-    da usare nella logica IKKT.
-
-    Ritorna un dizionario con:
-    - name
-    - kind
-    - target
-    - value
-    - c_value   (signed, in forma C(a) <= 0)
-    - active
-    """
     kind = spec["kind"]
     target = float(spec["target"])
     value = get_constraint_value(name, spec, metrics, x, yu, yl)
@@ -165,12 +153,6 @@ def build_signed_constraint_entry(name, spec, metrics, x, yu, yl, tol_active=0.0
 
 
 def build_all_signed_constraints(settings_constraints, metrics, x, yu, yl, tol_active=0.0):
-    """
-    Costruisce tutti i vincoli abilitati in forma standardizzata per IKKT.
-
-    Restituisce una lista di dizionari.
-    Per thickness_stations crea una entry separata per ogni stazione.
-    """
     entries = []
 
     for name, spec in settings_constraints.items():
@@ -219,15 +201,6 @@ def build_all_signed_constraints(settings_constraints, metrics, x, yu, yl, tol_a
 
 
 def evaluate_constraints(settings_constraints, metrics, x, yu, yl, current_best_error):
-    """
-    Valuta i vincoli attivi e costruisce la penalty soft totale.
-
-    La penalty di ciascun vincolo e':
-        alpha * scale_obj * (violation / scale)^2
-
-    dove:
-        scale_obj = max(current_best_error, 1e-6)
-    """
     penalty_total = 0.0
     details = {}
 
@@ -298,10 +271,83 @@ def evaluate_constraints(settings_constraints, metrics, x, yu, yl, current_best_
     return penalty_total, details
 
 
-def _build_geometric_constraint_functions(settings_constraints, x, yu_init, yl_init, upper_centers, lower_centers, hh_power):
-    from geometry import apply_hicks_henne_deformation
+def _append_slsqp_constraint(constraints, value_fun, kind, target, tol=0.0, jac_fun=None):
+    target = float(target)
+    tol = float(tol)
 
-    constraints = []
+    def _ineq_ge(a, vf=value_fun, t=target):
+        value = vf(a)
+        if value is None:
+            return -1.0e9
+        return float(value) - t
+
+    def _ineq_le(a, vf=value_fun, t=target):
+        value = vf(a)
+        if value is None:
+            return -1.0e9
+        return t - float(value)
+
+    def _eq_fun(a, vf=value_fun, t=target):
+        value = vf(a)
+        if value is None:
+            return 1.0e9
+        return float(value) - t
+
+    def _jac_pos(a, jf=jac_fun):
+        return np.asarray(jf(a), dtype=float)
+
+    def _jac_neg(a, jf=jac_fun):
+        return -np.asarray(jf(a), dtype=float)
+
+    if kind == "ge":
+        entry = {"type": "ineq", "fun": _ineq_ge}
+        if jac_fun is not None:
+            entry["jac"] = _jac_pos
+        constraints.append(entry)
+        return
+
+    if kind == "le":
+        entry = {"type": "ineq", "fun": _ineq_le}
+        if jac_fun is not None:
+            entry["jac"] = _jac_neg
+        constraints.append(entry)
+        return
+
+    if kind == "eq":
+        if tol > 0.0:
+            def _eq_lower(a, vf=value_fun, t=target, to=tol):
+                value = vf(a)
+                if value is None:
+                    return -1.0e9
+                return float(value) - (t - to)
+
+            def _eq_upper(a, vf=value_fun, t=target, to=tol):
+                value = vf(a)
+                if value is None:
+                    return -1.0e9
+                return (t + to) - float(value)
+
+            entry_lower = {"type": "ineq", "fun": _eq_lower}
+            entry_upper = {"type": "ineq", "fun": _eq_upper}
+
+            if jac_fun is not None:
+                entry_lower["jac"] = _jac_pos
+                entry_upper["jac"] = _jac_neg
+
+            constraints.append(entry_lower)
+            constraints.append(entry_upper)
+        else:
+            entry = {"type": "eq", "fun": _eq_fun}
+            if jac_fun is not None:
+                entry["jac"] = _jac_pos
+            constraints.append(entry)
+        return
+
+    raise ValueError(f"Unknown constraint kind: {kind}")
+
+
+def _build_geometry_from_a_factory(x, yu_init, yl_init, upper_centers, lower_centers, hh_power):
+    from geometry import apply_hicks_henne_deformation
 
     upper_centers = list(upper_centers)
     lower_centers = list(lower_centers)
@@ -322,6 +368,148 @@ def _build_geometric_constraint_functions(settings_constraints, x, yu_init, yl_i
             power=hh_power,
         )
 
+    return _build_geometry_from_a
+
+
+def _adaptive_fd_step(a_value, rel_step, abs_step_floor):
+    return max(float(rel_step) * abs(float(a_value)), float(abs_step_floor))
+
+
+def _fd_scalar_gradient(value_fun, a, bounds, rel_step, abs_step_floor):
+    a = np.asarray(a, dtype=float)
+    g = np.zeros_like(a, dtype=float)
+
+    f0 = value_fun(a)
+    if f0 is None:
+        return g
+
+    f0 = float(f0)
+
+    for j in range(len(a)):
+        aj = float(a[j])
+        lo, hi = bounds[j]
+
+        h = _adaptive_fd_step(aj, rel_step, abs_step_floor)
+
+        room_plus = max(0.0, hi - aj)
+        room_minus = max(0.0, aj - lo)
+
+        if room_plus >= h and room_minus >= h:
+            a_p = a.copy()
+            a_m = a.copy()
+            a_p[j] += h
+            a_m[j] -= h
+
+            fp = value_fun(a_p)
+            fm = value_fun(a_m)
+
+            if fp is not None and fm is not None:
+                g[j] = (float(fp) - float(fm)) / (2.0 * h)
+            else:
+                g[j] = 0.0
+            continue
+
+        if room_plus > 0.0:
+            h_fwd = min(h, room_plus)
+            a_p = a.copy()
+            a_p[j] += h_fwd
+
+            fp = value_fun(a_p)
+
+            if fp is not None and h_fwd > 0.0:
+                g[j] = (float(fp) - f0) / h_fwd
+            else:
+                g[j] = 0.0
+            continue
+
+        if room_minus > 0.0:
+            h_bwd = min(h, room_minus)
+            a_m = a.copy()
+            a_m[j] -= h_bwd
+
+            fm = value_fun(a_m)
+
+            if fm is not None and h_bwd > 0.0:
+                g[j] = (f0 - float(fm)) / h_bwd
+            else:
+                g[j] = 0.0
+            continue
+
+        g[j] = 0.0
+
+    return g
+
+
+def _build_area_gradient(x, upper_centers, lower_centers, hh_power):
+    from geometry import build_hicks_henne_basis
+
+    if len(upper_centers) > 0:
+        basis_upper = build_hicks_henne_basis(x, upper_centers, power=hh_power)
+        grad_upper = np.array([np.trapezoid(phi, x) for phi in basis_upper], dtype=float)
+    else:
+        grad_upper = np.zeros(0, dtype=float)
+
+    if len(lower_centers) > 0:
+        basis_lower = build_hicks_henne_basis(x, lower_centers, power=hh_power)
+        grad_lower = -np.array([np.trapezoid(phi, x) for phi in basis_lower], dtype=float)
+    else:
+        grad_lower = np.zeros(0, dtype=float)
+
+    return np.concatenate([grad_upper, grad_lower])
+
+
+def _build_thickness_station_gradient(x_station, upper_centers, lower_centers, hh_power):
+    from geometry import build_hicks_henne_basis
+
+    x_eval = np.array([float(x_station)], dtype=float)
+
+    if len(upper_centers) > 0:
+        phi_u = build_hicks_henne_basis(x_eval, upper_centers, power=hh_power)[:, 0]
+    else:
+        phi_u = np.zeros(0, dtype=float)
+
+    if len(lower_centers) > 0:
+        phi_l = -build_hicks_henne_basis(x_eval, lower_centers, power=hh_power)[:, 0]
+    else:
+        phi_l = np.zeros(0, dtype=float)
+
+    return np.concatenate([phi_u, phi_l])
+
+
+def _build_geometric_constraint_functions(
+    settings_constraints,
+    x,
+    yu_init,
+    yl_init,
+    upper_centers,
+    lower_centers,
+    hh_power,
+):
+    constraints = []
+
+    _build_geometry_from_a = _build_geometry_from_a_factory(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        upper_centers=upper_centers,
+        lower_centers=lower_centers,
+        hh_power=hh_power,
+    )
+
+    from settings import SETTINGS
+
+    bmin, bmax = SETTINGS["optimization"]["bounds"]
+    bounds = [(bmin, bmax)] * (len(upper_centers) + len(lower_centers))
+    rel_step = SETTINGS["optimization"]["fd_rel_step"]
+    abs_step_floor = SETTINGS["optimization"]["fd_abs_step_floor"]
+
+    area_grad = _build_area_gradient(
+        x=x,
+        upper_centers=upper_centers,
+        lower_centers=lower_centers,
+        hh_power=hh_power,
+    )
+
     for name, spec in settings_constraints.items():
         if not spec.get("enabled", False):
             continue
@@ -330,66 +518,78 @@ def _build_geometric_constraint_functions(settings_constraints, x, yu_init, yl_i
             continue
 
         kind = spec["kind"]
+        tol = float(spec.get("tol", 0.0))
 
         if name == "thickness_stations":
             for st in spec.get("stations", []):
                 target = float(st["target"])
                 xs = float(st["x"])
+                st_tol = float(st.get("tol", tol))
 
-                def fun(a, xs=xs, target=target, kind=kind):
+                station_grad = _build_thickness_station_gradient(
+                    x_station=xs,
+                    upper_centers=upper_centers,
+                    lower_centers=lower_centers,
+                    hh_power=hh_power,
+                )
+
+                def value_fun(a, xs=xs):
                     yu, yl = _build_geometry_from_a(a)
-                    value = thickness_at_x(x, yu, yl, xs)
-                    if kind == "eq":
-                        return value - target
-                    if kind == "ge":
-                        return value - target
-                    if kind == "le":
-                        return target - value
-                    raise ValueError(f"Unknown constraint kind: {kind}")
+                    return thickness_at_x(x, yu, yl, xs)
 
-                ctype = "eq" if kind == "eq" else "ineq"
-                constraints.append({"type": ctype, "fun": fun})
+                def jac_fun(a, g=station_grad):
+                    return np.asarray(g, dtype=float)
+
+                _append_slsqp_constraint(
+                    constraints=constraints,
+                    value_fun=value_fun,
+                    kind=kind,
+                    target=target,
+                    tol=st_tol,
+                    jac_fun=jac_fun,
+                )
             continue
 
         target = float(spec["target"])
 
-        def fun(a, name=name, target=target, kind=kind):
+        def value_fun(a, name=name):
             yu, yl = _build_geometry_from_a(a)
 
             if name == "area":
-                value = compute_area(x, yu, yl)
-            elif name == "tmax":
-                value = compute_max_thickness(yu, yl)
-            else:
-                raise ValueError(f"Unknown geometric constraint name: {name}")
+                return compute_area(x, yu, yl)
+            if name == "tmax":
+                return compute_max_thickness(yu, yl)
 
-            if kind == "eq":
-                return value - target
-            if kind == "ge":
-                return value - target
-            if kind == "le":
-                return target - value
-            raise ValueError(f"Unknown constraint kind: {kind}")
+            raise ValueError(f"Unknown geometric constraint name: {name}")
 
-        ctype = "eq" if kind == "eq" else "ineq"
-        constraints.append({"type": ctype, "fun": fun})
+        if name == "area":
+            def jac_fun(a, g=area_grad):
+                return np.asarray(g, dtype=float)
+        else:
+            def jac_fun(a, vf=value_fun, bnds=bounds, rs=rel_step, af=abs_step_floor):
+                return _fd_scalar_gradient(vf, a, bnds, rs, af)
+
+        _append_slsqp_constraint(
+            constraints=constraints,
+            value_fun=value_fun,
+            kind=kind,
+            target=target,
+            tol=tol,
+            jac_fun=jac_fun,
+        )
 
     return constraints
 
 
-def build_slsqp_geometric_constraints(settings_constraints, x, yu_init, yl_init, upper_centers, lower_centers, hh_power):
-    """
-    Costruisce la lista di vincoli geometrici nel formato richiesto da SciPy SLSQP.
-
-    Convenzione SciPy:
-    - 'eq'  : fun(a) = 0
-    - 'ineq': fun(a) >= 0
-
-    Per questo motivo:
-    - ge  -> value - target >= 0
-    - le  -> target - value >= 0
-    - eq  -> value - target = 0
-    """
+def build_slsqp_geometric_constraints(
+    settings_constraints,
+    x,
+    yu_init,
+    yl_init,
+    upper_centers,
+    lower_centers,
+    hh_power,
+):
     return _build_geometric_constraint_functions(
         settings_constraints=settings_constraints,
         x=x,
@@ -399,3 +599,139 @@ def build_slsqp_geometric_constraints(settings_constraints, x, yu_init, yl_init,
         lower_centers=lower_centers,
         hh_power=hh_power,
     )
+
+
+def build_slsqp_all_constraints(
+    settings_constraints,
+    x,
+    yu_init,
+    yl_init,
+    upper_centers,
+    lower_centers,
+    hh_power,
+    alpha_deg,
+    reynolds,
+    xfoil_iter,
+    timeout,
+    working_dir,
+):
+    from geometry import write_dat
+    from xfoil_wrapper import run_xfoil
+    from settings import SETTINGS
+
+    constraints = _build_geometric_constraint_functions(
+        settings_constraints=settings_constraints,
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        upper_centers=upper_centers,
+        lower_centers=lower_centers,
+        hh_power=hh_power,
+    )
+
+    _build_geometry_from_a = _build_geometry_from_a_factory(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        upper_centers=upper_centers,
+        lower_centers=lower_centers,
+        hh_power=hh_power,
+    )
+
+    working_dir = Path(working_dir)
+    working_dir.mkdir(parents=True, exist_ok=True)
+
+    bmin, bmax = SETTINGS["optimization"]["bounds"]
+    bounds = [(bmin, bmax)] * (len(upper_centers) + len(lower_centers))
+    rel_step = SETTINGS["optimization"]["fd_rel_step"]
+    abs_step_floor = SETTINGS["optimization"]["fd_abs_step_floor"]
+
+    eval_counter = {"k": 0}
+    metrics_cache = {}
+    grad_cache = {}
+
+    def _evaluate_aero_metrics(a):
+        key = tuple(np.round(np.asarray(a, dtype=float), 12))
+
+        if key in metrics_cache:
+            return metrics_cache[key]
+
+        eval_counter["k"] += 1
+        k = eval_counter["k"]
+
+        yu, yl = _build_geometry_from_a(a)
+        airfoil_dat = working_dir / f"constraint_airfoil_{k:05d}.dat"
+        run_dir = working_dir / f"constraint_run_{k:05d}"
+
+        write_dat(airfoil_dat, x, yu, yl, name=f"CONSTRAINT_{k:05d}")
+
+        res = run_xfoil(
+            airfoil_dat=airfoil_dat,
+            alpha_deg=alpha_deg,
+            reynolds=reynolds,
+            xfoil_iter=xfoil_iter,
+            timeout=timeout,
+            working_dir=run_dir,
+        )
+
+        if not res["success"] or res["polar"] is None:
+            metrics_cache[key] = None
+            return None
+
+        metrics = compute_metrics(x, yu, yl, res["polar"])
+        metrics_cache[key] = metrics
+        return metrics
+
+    def _evaluate_aero_metric_gradient(metric_name, a):
+        key = (metric_name, tuple(np.round(np.asarray(a, dtype=float), 12)))
+
+        if key in grad_cache:
+            return grad_cache[key]
+
+        def scalar_value(z):
+            metrics = _evaluate_aero_metrics(z)
+            if metrics is None:
+                return None
+            return float(metrics[metric_name])
+
+        grad = _fd_scalar_gradient(
+            value_fun=scalar_value,
+            a=a,
+            bounds=bounds,
+            rel_step=rel_step,
+            abs_step_floor=abs_step_floor,
+        )
+
+        grad_cache[key] = grad
+        return grad
+
+    for name, spec in settings_constraints.items():
+        if not spec.get("enabled", False):
+            continue
+
+        if name not in AERODYNAMIC_CONSTRAINT_NAMES:
+            continue
+
+        kind = spec["kind"]
+        target = float(spec["target"])
+        tol = float(spec.get("tol", 0.0))
+
+        def value_fun(a, metric_name=name):
+            metrics = _evaluate_aero_metrics(a)
+            if metrics is None:
+                return None
+            return float(metrics[metric_name])
+
+        def jac_fun(a, metric_name=name):
+            return _evaluate_aero_metric_gradient(metric_name, a)
+
+        _append_slsqp_constraint(
+            constraints=constraints,
+            value_fun=value_fun,
+            kind=kind,
+            target=target,
+            tol=tol,
+            jac_fun=jac_fun,
+        )
+
+    return constraints

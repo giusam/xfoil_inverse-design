@@ -6,8 +6,7 @@ from settings import SETTINGS
 from geometry import apply_hicks_henne_deformation, write_dat
 from xfoil_wrapper import run_xfoil
 from cp_utils import split_upper_lower_cp_from_x
-from constraints import compute_metrics, evaluate_constraints, split_constraints_by_domain
-
+from constraints import compute_metrics
 
 def cp_error_interp(x_ref, cp_ref, x_cmp, cp_cmp):
     x_ref = np.asarray(x_ref, dtype=float)
@@ -76,7 +75,6 @@ def make_objective(
 
     penalty_factor = SETTINGS["optimization"]["penalty_factor"]
     penalty_floor = 1.0e-6
-    aero_constraints, _ = split_constraints_by_domain(SETTINGS.get("constraints", {}))
 
     # Global logs
     seed_value = SETTINGS.get("run", {}).get("seed", "unknown")
@@ -191,16 +189,10 @@ def make_objective(
         err = total_cp_error(cp_target, cp_candidate)
 
         metrics = compute_metrics(x, yu, yl, res["polar"])
-        constraint_penalty, constraint_details = evaluate_constraints(
-            aero_constraints,
-            metrics,
-            x,
-            yu,
-            yl,
-            current_best_error,
-        )
+        constraint_penalty = 0.0
+        constraint_details = {}
 
-        objective_total = err + constraint_penalty
+        objective_total = err
 
         print(
             f"eval={k:04d}  OK   "
