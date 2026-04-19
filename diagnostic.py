@@ -30,14 +30,14 @@ SNAP_ROOT = BASE_DIR / SETTINGS.get("snapshots", {}).get("dir_name", "snapshots"
 
 SNAP_SEED = 0
 SNAP_METHOD = "adapt_grad"   # "adapt_grad" | "adapt_ikkt" | "adapt_pred"
-SNAP_LEVEL = 1
+SNAP_LEVEL = 2
 
 SNAPSHOT_PATH = SNAP_ROOT / f"seed_{SNAP_SEED}" / SNAP_METHOD / f"level_{SNAP_LEVEL:03d}.npz"
 
 CANDIDATES_TO_TEST = None
 
 H_ABS_LIST = None   # es: [5.0e-4, 1.0e-3] per override manuale
-H_REL_STEP = None   # es: 5.0e-3 per override manuale
+H_REL_STEP_LIST = [5.0e-3, 1.0e-3, 5.0e-4, 1.0e-4]   # es: 5.0e-3 per override manuale
 REG_LIST = None     # es: [1.0e-8, 1.0e-6] per override manuale
 
 WRITE_SUMMARY_CSV = True
@@ -184,14 +184,18 @@ def _resolve_diagnostic_sweep_params():
         if H_ABS_LIST is not None
         else [float(default_h_abs)]
     )
-    h_rel_step = float(H_REL_STEP) if H_REL_STEP is not None else float(default_h_rel)
+    h_rel_step_list = (
+        [float(v) for v in H_REL_STEP_LIST]
+        if H_REL_STEP_LIST is not None
+        else [float(default_h_rel)]
+    )
     reg_list = (
         [float(v) for v in REG_LIST]
         if REG_LIST is not None
         else [float(default_reg)]
     )
 
-    return h_abs_list, h_rel_step, reg_list
+    return h_abs_list, h_rel_step_list, reg_list
 
 
 def _write_section(writer, title, arr):
@@ -219,7 +223,7 @@ def _write_section(writer, title, arr):
     writer.writerow([])
 
 
-def _save_candidate_matrix_csv(out, save_dir, h_abs, reg):
+def _save_candidate_matrix_csv(out, save_dir, h_abs, rel_step, reg):
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -229,6 +233,7 @@ def _save_candidate_matrix_csv(out, save_dir, h_abs, reg):
     fname = (
         f"diagnostic_{side}_{x_val:.6f}"
         f"_h_{_safe_tag_float(h_abs)}"
+        f"_rel_step_{_safe_tag_float(rel_step)}"
         f"_reg_{_safe_tag_float(reg)}.csv"
     )
     fpath = save_dir / fname
@@ -429,13 +434,12 @@ def _compute_pred_breakdown(state, candidate, pred_context, workdir):
         ],
     }
 
-
 def main():
     if not SNAPSHOT_PATH.exists():
         raise FileNotFoundError(f"Snapshot file not found: {SNAPSHOT_PATH}")
 
     snapshot = _load_level_snapshot(SNAPSHOT_PATH)
-    h_abs_list, h_rel_step, reg_list = _resolve_diagnostic_sweep_params()
+    h_abs_list, h_rel_step_list, reg_list = _resolve_diagnostic_sweep_params()
     run_dir = BASE_DIR / "run_diagnostic_pred" / snapshot["snapshot_path"].stem
 
     if run_dir.exists():
@@ -470,87 +474,101 @@ def main():
 
     try:
         for reg in reg_list:
-            for h_abs in h_abs_list:
-                SETTINGS["optimization"]["pred_fd_rel_step"] = h_rel_step
-                SETTINGS["optimization"]["pred_fd_abs_step_floor"] = h_abs
-                SETTINGS["optimization"]["pred_hessian_reg"] = reg
+            for h_rel_step in h_rel_step_list:
+                for h_abs in h_abs_list:
+                    SETTINGS["optimization"]["pred_fd_rel_step"] = h_rel_step
+                    SETTINGS["optimization"]["pred_fd_abs_step_floor"] = h_abs
+                    SETTINGS["optimization"]["pred_hessian_reg"] = reg
 
-                pred_context = _prepare_pred_level_context(
-                    x=snapshot["x"],
-                    yu_init=snapshot["yu_init"],
-                    yl_init=snapshot["yl_init"],
-                    cp_target=snapshot["cp_target"],
-                    upper_centers=snapshot["upper_centers"],
-                    lower_centers=snapshot["lower_centers"],
-                    a_opt=snapshot["a_opt"],
-                    current_best_error=snapshot["err_opt"],
-                    workdir=run_dir / f"pred_context_h_{_safe_tag_float(h_abs)}_reg_{_safe_tag_float(reg)}",
-                )
-
-                print("\n============================================================")
-                print(f"SWEEP CASE: h_abs={h_abs:.6e}  rel_step={h_rel_step:.6e}  reg={reg:.6e}")
-                print("============================================================")
-
-                case_rows = []
-                for cand in test_candidates:
-                    out = _compute_pred_breakdown(
-                        state=snapshot,
-                        candidate=cand,
-                        pred_context=pred_context,
-                        workdir=run_dir / f"diag_h_{_safe_tag_float(h_abs)}_reg_{_safe_tag_float(reg)}",
+                    pred_context = _prepare_pred_level_context(
+                        x=snapshot["x"],
+                        yu_init=snapshot["yu_init"],
+                        yl_init=snapshot["yl_init"],
+                        cp_target=snapshot["cp_target"],
+                        upper_centers=snapshot["upper_centers"],
+                        lower_centers=snapshot["lower_centers"],
+                        a_opt=snapshot["a_opt"],
+                        current_best_error=snapshot["err_opt"],
+                        workdir=run_dir / (
+                            f"pred_context_h_{_safe_tag_float(h_abs)}"
+                            f"_rel_{_safe_tag_float(h_rel_step)}"
+                            f"_reg_{_safe_tag_float(reg)}"
+                        ),
                     )
 
-                    row = {
-                        "side": out["side"],
-                        "x": float(out["x"]),
-                        "h_abs": float(h_abs),
-                        "rel_step": float(h_rel_step),
-                        "reg": float(reg),
-                        "delta_pred_full": out["delta_pred_full"],
-                        "delta_pred_no_rest": out["delta_pred_no_rest"],
-                        "raw_grad": out["raw_grad"],
-                        "grad_norm": out["grad_norm"],
-                        "dy_new": out["dy_new"],
-                        "dy_norm": out["dy_norm"],
-                        "gamma_norm": out["gamma_norm"],
-                        "gamma_no_rest_norm": out["gamma_no_rest_norm"],
-                        "h_nn": out["h_nn"],
-                        "h_col_maxabs": out["h_col_maxabs"],
-                        "eig_min": out["eig_min"],
-                        "eig_max": out["eig_max"],
-                        "cond_raw": out["cond_raw"],
-                        "cond_reg": out["cond_reg"],
-                        "n_active": out["n_active"],
-                        "n_free": out["n_free"],
-                        "active_names": "|".join(out["active_names"]),
-                    }
-                    case_rows.append(row)
-                    rows.append(row)
-
-                    if WRITE_MATRIX_CSV:
-                        csv_path = _save_candidate_matrix_csv(
-                            out=out,
-                            save_dir=run_dir / "candidate_csv",
-                            h_abs=h_abs,
-                            reg=reg,
-                        )
-                        print(f"  saved CSV -> {csv_path.name}")
-
-                case_rows.sort(key=lambda item: (-item["delta_pred_full"], item["x"]))
-
-                print("rank | side  | x        | d_pred_full    | d_pred_no_rest | h_nn         | h_col_max     | eig_min       | cond_reg")
-                for idx, row in enumerate(case_rows, start=1):
+                    print("\n============================================================")
                     print(
-                        f"{idx:4d} | "
-                        f"{row['side']:<5s} | "
-                        f"{row['x']:.6f} | "
-                        f"{row['delta_pred_full']:.6e} | "
-                        f"{row['delta_pred_no_rest']:.6e} | "
-                        f"{row['h_nn']:.6e} | "
-                        f"{row['h_col_maxabs']:.6e} | "
-                        f"{row['eig_min']:.6e} | "
-                        f"{row['cond_reg']:.6e}"
+                        f"SWEEP CASE: h_abs={h_abs:.6e}  "
+                        f"rel_step={h_rel_step:.6e}  "
+                        f"reg={reg:.6e}"
                     )
+                    print("============================================================")
+
+                    case_rows = []
+                    for cand in test_candidates:
+                        out = _compute_pred_breakdown(
+                            state=snapshot,
+                            candidate=cand,
+                            pred_context=pred_context,
+                            workdir=run_dir / (
+                                f"diag_h_{_safe_tag_float(h_abs)}"
+                                f"_rel_{_safe_tag_float(h_rel_step)}"
+                                f"_reg_{_safe_tag_float(reg)}"
+                            ),
+                        )
+
+                        row = {
+                            "side": out["side"],
+                            "x": float(out["x"]),
+                            "h_abs": float(h_abs),
+                            "rel_step": float(h_rel_step),
+                            "reg": float(reg),
+                            "delta_pred_full": out["delta_pred_full"],
+                            "delta_pred_no_rest": out["delta_pred_no_rest"],
+                            "raw_grad": out["raw_grad"],
+                            "grad_norm": out["grad_norm"],
+                            "dy_new": out["dy_new"],
+                            "dy_norm": out["dy_norm"],
+                            "gamma_norm": out["gamma_norm"],
+                            "gamma_no_rest_norm": out["gamma_no_rest_norm"],
+                            "h_nn": out["h_nn"],
+                            "h_col_maxabs": out["h_col_maxabs"],
+                            "eig_min": out["eig_min"],
+                            "eig_max": out["eig_max"],
+                            "cond_raw": out["cond_raw"],
+                            "cond_reg": out["cond_reg"],
+                            "n_active": out["n_active"],
+                            "n_free": out["n_free"],
+                            "active_names": "|".join(out["active_names"]),
+                        }
+                        case_rows.append(row)
+                        rows.append(row)
+
+                        if WRITE_MATRIX_CSV:
+                            csv_path = _save_candidate_matrix_csv(
+                                out=out,
+                                save_dir=run_dir / "candidate_csv",
+                                h_abs=h_abs,
+                                rel_step=h_rel_step,
+                                reg=reg,
+                            )
+                            print(f"  saved CSV -> {csv_path.name}")
+
+                    case_rows.sort(key=lambda item: (-item["delta_pred_full"], item["x"]))
+
+                    print("rank | side  | x        | d_pred_full    | d_pred_no_rest | h_nn         | h_col_max     | eig_min       | cond_reg")
+                    for idx, row in enumerate(case_rows, start=1):
+                        print(
+                            f"{idx:4d} | "
+                            f"{row['side']:<5s} | "
+                            f"{row['x']:.6f} | "
+                            f"{row['delta_pred_full']:.6e} | "
+                            f"{row['delta_pred_no_rest']:.6e} | "
+                            f"{row['h_nn']:.6e} | "
+                            f"{row['h_col_maxabs']:.6e} | "
+                            f"{row['eig_min']:.6e} | "
+                            f"{row['cond_reg']:.6e}"
+                        )
     finally:
         SETTINGS["optimization"]["pred_fd_rel_step"] = old_rel
         SETTINGS["optimization"]["pred_fd_abs_step_floor"] = old_abs
@@ -589,7 +607,6 @@ def main():
                 writer.writerow(row)
 
         print(f"\nSummary CSV written to: {csv_path}")
-
 
 if __name__ == "__main__":
     main()
