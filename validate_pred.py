@@ -17,7 +17,7 @@ SNAP_ROOT = BASE_DIR / SETTINGS.get("snapshots", {}).get("dir_name", "snapshots"
 
 SNAP_METHOD = "adapt_grad"   # "adapt_grad" | "adapt_ikkt" | "adapt_pred"
 SNAP_SEEDS = [0]
-SNAP_LEVELS = [0, 1, 2, 3]   # es: [0, 3, 4, 5, 9] ; None -> tutti i level_*.npz trovati
+SNAP_LEVELS = [0]   # es: [0, 3, 4, 5, 9] ; None -> tutti i level_*.npz trovati
 
 CANDIDATES_TO_TEST = None
 WRITE_CSV = True

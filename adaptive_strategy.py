@@ -1,5 +1,5 @@
 from pathlib import Path
-
+import shutil
 import numpy as np
 
 from settings import SETTINGS
@@ -124,6 +124,13 @@ def run_adaptive_strategy(
     indicator,
 ):
     opt_ad = SETTINGS["optimization"]["adaptive"]
+
+    snapshots_cfg = SETTINGS.get("snapshots", {})
+    if bool(snapshots_cfg.get("enabled", False)):
+        snapshot_dir = Path(workdir) / str(snapshots_cfg.get("dir_name", "snapshots"))
+        if snapshot_dir.exists():
+            shutil.rmtree(snapshot_dir)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     n0 = opt_ad["n0"]
     n_final = opt_ad["n_final"]

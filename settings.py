@@ -4,7 +4,7 @@ from pathlib import Path
 SETTINGS = {
 
     "run": {
-        "do_static": False,
+        "do_static": True,
         "do_adaptive_grad": True,
         "do_adaptive_ikkt": False,
         "do_adaptive_pred": False,
@@ -88,20 +88,19 @@ SETTINGS = {
 
     "optimization": {
         "hh_power": 4,
-        "n_hh_static": 16,
-        "bounds": (-0.01, 0.01),
+        "n_hh_static": 20,
+        "bounds": (-0.05, 0.05),
         "maxiter": 200,
         "ftol": 1.0e-8,
-        "fd_rel_step": 1.0e-2,
-        "fd_abs_step_floor": 0.1e-4,
-        "pred_fd_rel_step": 5.0e-3,
-        "pred_fd_abs_step_floor": 5.0e-8,
+        "opt_fd_target_peak_normal": 1e-4,
+        "score_fd_target_peak_normal": 1.0e-4,
+        "pred_fd_target_peak_normal": 5e-4,
         "pred_hessian_reg": 1.0e-8,
         "penalty_factor": 20.0,
         "adaptive": {
             "tol_active": 1.0e-3,
             "n0": 6,
-            "n_final": 16,
+            "n_final": 20,
             "n_add_per_level": 1,
             "growth_ratio": 1.25,
             "xmin": 0.05,

@@ -1,6 +1,7 @@
 import numpy as np
 
 from adaptive_candidate import _evaluate_objective_state
+from geometry import build_normal_peak_fd_steps
 
 
 def _adaptive_fd_step(a_value, rel_step, abs_step_floor):
@@ -14,6 +15,7 @@ def _score_fd_component(
     bounds,
     rel_step,
     abs_step_floor,
+    step_vector=None,
     base_item=None,
 ):
     a_base = np.asarray(a_base, dtype=float)
@@ -23,7 +25,7 @@ def _score_fd_component(
 
     aj = float(a_base[idx])
     lo, hi = bounds[idx]
-    h = _adaptive_fd_step(aj, rel_step, abs_step_floor)
+    h = float(step_vector[idx]) if step_vector is not None else _adaptive_fd_step(aj, rel_step, abs_step_floor)
 
     room_plus = max(0.0, hi - aj)
     room_minus = max(0.0, aj - lo)
@@ -84,6 +86,7 @@ def _compute_full_objective_gradient(
     bounds,
     rel_step,
     abs_step_floor,
+    step_vector=None,
     base_item=None,
 ):
     a_base = np.asarray(a_base, dtype=float)
@@ -104,6 +107,7 @@ def _compute_full_objective_gradient(
             bounds=bounds,
             rel_step=rel_step,
             abs_step_floor=abs_step_floor,
+            step_vector=step_vector,
             base_item=base_item,
         )
         grad_j[j] = float(out["grad"])
@@ -122,6 +126,7 @@ def _compute_full_aero_gradients(
     bounds,
     rel_step,
     abs_step_floor,
+    step_vector=None,
     base_item=None,
 ):
     a_base = np.asarray(a_base, dtype=float)
@@ -138,7 +143,7 @@ def _compute_full_aero_gradients(
     for j in range(ndv):
         aj = float(a_base[j])
         lo, hi = bounds[j]
-        h = _adaptive_fd_step(aj, rel_step, abs_step_floor)
+        h = float(step_vector[j]) if step_vector is not None else _adaptive_fd_step(aj, rel_step, abs_step_floor)
 
         room_plus = max(0.0, hi - aj)
         room_minus = max(0.0, aj - lo)

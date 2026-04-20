@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+from geometry import build_normal_peak_fd_steps
 
 AERODYNAMIC_CONSTRAINT_NAMES = {"CL", "CD", "CM"}
 GEOMETRIC_CONSTRAINT_NAMES = {"tmax", "area", "thickness_stations"}
@@ -375,7 +376,18 @@ def _adaptive_fd_step(a_value, rel_step, abs_step_floor):
     return max(float(rel_step) * abs(float(a_value)), float(abs_step_floor))
 
 
-def _fd_scalar_gradient(value_fun, a, bounds, rel_step, abs_step_floor):
+def _fd_scalar_gradient(
+    value_fun,
+    a,
+    bounds,
+    x,
+    yu_init,
+    yl_init,
+    upper_centers,
+    lower_centers,
+    hh_power,
+    target_peak_normal,
+):
     a = np.asarray(a, dtype=float)
     g = np.zeros_like(a, dtype=float)
 
@@ -384,12 +396,22 @@ def _fd_scalar_gradient(value_fun, a, bounds, rel_step, abs_step_floor):
         return g
 
     f0 = float(f0)
+    step_vector = build_normal_peak_fd_steps(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        upper_centers=upper_centers,
+        lower_centers=lower_centers,
+        a=a,
+        target_peak_normal=target_peak_normal,
+        power=hh_power,
+    )
 
     for j in range(len(a)):
         aj = float(a[j])
         lo, hi = bounds[j]
 
-        h = _adaptive_fd_step(aj, rel_step, abs_step_floor)
+        h = float(step_vector[j])
 
         room_plus = max(0.0, hi - aj)
         room_minus = max(0.0, aj - lo)
@@ -500,8 +522,7 @@ def _build_geometric_constraint_functions(
 
     bmin, bmax = SETTINGS["optimization"]["bounds"]
     bounds = [(bmin, bmax)] * (len(upper_centers) + len(lower_centers))
-    rel_step = SETTINGS["optimization"]["fd_rel_step"]
-    abs_step_floor = SETTINGS["optimization"]["fd_abs_step_floor"]
+    target_peak_normal = SETTINGS["optimization"]["opt_fd_target_peak_normal"]
 
     area_grad = _build_area_gradient(
         x=x,
@@ -566,8 +587,19 @@ def _build_geometric_constraint_functions(
             def jac_fun(a, g=area_grad):
                 return np.asarray(g, dtype=float)
         else:
-            def jac_fun(a, vf=value_fun, bnds=bounds, rs=rel_step, af=abs_step_floor):
-                return _fd_scalar_gradient(vf, a, bnds, rs, af)
+            def jac_fun(
+                a,
+                vf=value_fun,
+                bnds=bounds,
+                x_grid=x,
+                yu0=yu_init,
+                yl0=yl_init,
+                uc=upper_centers,
+                lc=lower_centers,
+                hp=hh_power,
+                tpn=target_peak_normal,
+            ):
+                return _fd_scalar_gradient(vf, a, bnds, x_grid, yu0, yl0, uc, lc, hp, tpn)
 
         _append_slsqp_constraint(
             constraints=constraints,
@@ -643,8 +675,7 @@ def build_slsqp_all_constraints(
 
     bmin, bmax = SETTINGS["optimization"]["bounds"]
     bounds = [(bmin, bmax)] * (len(upper_centers) + len(lower_centers))
-    rel_step = SETTINGS["optimization"]["fd_rel_step"]
-    abs_step_floor = SETTINGS["optimization"]["fd_abs_step_floor"]
+    target_peak_normal = SETTINGS["optimization"]["opt_fd_target_peak_normal"]
 
     eval_counter = {"k": 0}
     metrics_cache = {}
@@ -698,8 +729,13 @@ def build_slsqp_all_constraints(
             value_fun=scalar_value,
             a=a,
             bounds=bounds,
-            rel_step=rel_step,
-            abs_step_floor=abs_step_floor,
+            x=x,
+            yu_init=yu_init,
+            yl_init=yl_init,
+            upper_centers=upper_centers,
+            lower_centers=lower_centers,
+            hh_power=hh_power,
+            target_peak_normal=target_peak_normal,
         )
 
         grad_cache[key] = grad

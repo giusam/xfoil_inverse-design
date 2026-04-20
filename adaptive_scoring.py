@@ -1,5 +1,6 @@
 import numpy as np
 
+from geometry import build_normal_peak_fd_steps
 from settings import SETTINGS
 from adaptive_candidate import (
     _build_extended_space,
@@ -25,6 +26,7 @@ def _score_candidate_grad(
     bounds,
     rel_step,
     abs_step_floor,
+    step_vector,
     base_item,
 ):
     grad_j, fd_diag = _compute_full_objective_gradient(
@@ -33,6 +35,7 @@ def _score_candidate_grad(
         bounds=bounds,
         rel_step=rel_step,
         abs_step_floor=abs_step_floor,
+        step_vector=step_vector,
         base_item=base_item,
     )
 
@@ -60,6 +63,7 @@ def _score_candidate_ikkt(
     bounds,
     rel_step,
     abs_step_floor,
+    step_vector,
     base_item,
 ):
     if base_item.get("status") != "OK":
@@ -88,6 +92,7 @@ def _score_candidate_ikkt(
         bounds=bounds,
         rel_step=rel_step,
         abs_step_floor=abs_step_floor,
+        step_vector=step_vector,
         base_item=base_item,
     )
 
@@ -172,10 +177,24 @@ def score_candidate(
 
     bmin, bmax = SETTINGS["optimization"]["bounds"]
     bounds = [(bmin, bmax)] * len(a_base)
-    rel_step = SETTINGS["optimization"]["fd_rel_step"]
-    abs_step_floor = SETTINGS["optimization"]["fd_abs_step_floor"]
+    rel_step = 0.0
+    abs_step_floor = 0.0
 
     base_item = _evaluate_objective_state(objective, a_base)
+    step_vector = None
+
+    if indicator in ("GRAD", "IKKT"):
+        target_peak_normal = SETTINGS["optimization"]["score_fd_target_peak_normal"]
+        step_vector = build_normal_peak_fd_steps(
+            x=x,
+            yu_init=yu_init,
+            yl_init=yl_init,
+            upper_centers=new_upper,
+            lower_centers=new_lower,
+            a=a_base,
+            target_peak_normal=target_peak_normal,
+            power=SETTINGS["optimization"]["hh_power"],
+        )
 
     if indicator == "IKKT":
         out = _score_candidate_ikkt(
@@ -190,6 +209,7 @@ def score_candidate(
             bounds=bounds,
             rel_step=rel_step,
             abs_step_floor=abs_step_floor,
+            step_vector=step_vector,
             base_item=base_item,
         )
         active_names = [
@@ -277,6 +297,7 @@ def score_candidate(
         bounds=bounds,
         rel_step=rel_step,
         abs_step_floor=abs_step_floor,
+        step_vector=step_vector,
         base_item=base_item,
     )
 

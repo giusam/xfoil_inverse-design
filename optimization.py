@@ -4,7 +4,7 @@ import numpy as np
 from scipy.optimize import minimize
 
 from settings import SETTINGS
-from geometry import apply_hicks_henne_deformation, write_dat
+from geometry import apply_hicks_henne_deformation, build_normal_peak_fd_steps, write_dat
 from xfoil_wrapper import run_xfoil
 from cp_utils import split_upper_lower_cp_from_x
 from objective import make_objective, total_cp_error
@@ -27,14 +27,18 @@ def _compute_explicit_jac(
     objective,
     a,
     bounds,
-    rel_step=1.0e-2,
-    abs_step_floor=2.0e-5,
+    x,
+    yu_init,
+    yl_init,
+    upper_centers,
+    lower_centers,
+    target_peak_normal,
 ):
     """
     Explicit finite-difference Jacobian for SLSQP.
 
     Step logic:
-    - nominal step h_j = max(rel_step * abs(a_j), abs_step_floor)
+    - geometry-based step from target peak normal deformation
     - clipped to bounds
     - central FD when possible
     - one-sided FD near bounds
@@ -42,12 +46,22 @@ def _compute_explicit_jac(
     """
     a = np.asarray(a, dtype=float)
     g = np.zeros_like(a, dtype=float)
+    step_vector = build_normal_peak_fd_steps(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        upper_centers=upper_centers,
+        lower_centers=lower_centers,
+        a=a,
+        target_peak_normal=target_peak_normal,
+        power=SETTINGS["optimization"]["hh_power"],
+    )
 
     for j in range(len(a)):
         aj = float(a[j])
         lo, hi = bounds[j]
 
-        h = max(rel_step * abs(aj), abs_step_floor)
+        h = float(step_vector[j])
 
         room_plus = max(0.0, hi - aj)
         room_minus = max(0.0, aj - lo)
@@ -156,17 +170,19 @@ def optimize_for_centers(
     bounds = [(bmin, bmax)] * (len(upper_centers) + len(lower_centers))
     a0 = np.asarray(a0, dtype=float)
 
-    # Finite-difference settings for explicit Jacobian
-    jac_rel_step = SETTINGS["optimization"]["fd_rel_step"]
-    jac_abs_step_floor = SETTINGS["optimization"]["fd_abs_step_floor"]
+    jac_target_peak_normal = SETTINGS["optimization"]["opt_fd_target_peak_normal"]
 
     def jac_explicit(a_vec):
         return _compute_explicit_jac(
             objective=objective,
             a=a_vec,
             bounds=bounds,
-            rel_step=jac_rel_step,
-            abs_step_floor=jac_abs_step_floor,
+            x=x,
+            yu_init=yu_init,
+            yl_init=yl_init,
+            upper_centers=upper_centers,
+            lower_centers=lower_centers,
+            target_peak_normal=jac_target_peak_normal,
         )
 
     # Gradient snapshots for debug/scaling analysis
@@ -192,8 +208,7 @@ def optimize_for_centers(
     print(f"Failure penalty value         = {objective.get_penalty():.6e}")
     print(f"SLSQP constraints             = {len(all_constraints)}")
     print("Jacobian mode                 = EXPLICIT_FD")
-    print(f"jac_rel_step                  = {jac_rel_step:.6e}")
-    print(f"jac_abs_step_floor            = {jac_abs_step_floor:.6e}")
+    print(f"jac_target_peak_normal        = {jac_target_peak_normal:.6e}")
     _save_gradient_snapshot(f"{label}_initial", a0)
 
     result = minimize(

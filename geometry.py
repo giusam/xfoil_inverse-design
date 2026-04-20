@@ -155,3 +155,65 @@ def apply_hicks_henne_deformation(
     yl = yl_base + dy_lower
 
     return yu, yl
+
+
+def build_normal_peak_fd_steps(
+    x,
+    yu_init,
+    yl_init,
+    upper_centers,
+    lower_centers,
+    a,
+    target_peak_normal,
+    power=4,
+    eps=1.0e-14,
+):
+    x = np.asarray(x, dtype=float)
+    yu_init = np.asarray(yu_init, dtype=float)
+    yl_init = np.asarray(yl_init, dtype=float)
+    a = np.asarray(a, dtype=float)
+
+    upper_centers = list(upper_centers)
+    lower_centers = list(lower_centers)
+
+    nu = len(upper_centers)
+    nl = len(lower_centers)
+
+    if len(a) != nu + nl:
+        raise ValueError("Expected len(a) = len(upper_centers) + len(lower_centers)")
+
+    a_upper = a[:nu]
+    a_lower = a[nu:nu + nl]
+
+    yu, yl = apply_hicks_henne_deformation(
+        x=x,
+        yu_base=yu_init,
+        yl_base=yl_init,
+        a_upper=a_upper,
+        a_lower=a_lower,
+        upper_centers=upper_centers,
+        lower_centers=lower_centers,
+        power=power,
+    )
+
+    dyu_dx = np.gradient(yu, x)
+    dyl_dx = np.gradient(yl, x)
+
+    nfac_u = 1.0 / np.sqrt(1.0 + dyu_dx**2)
+    nfac_l = 1.0 / np.sqrt(1.0 + dyl_dx**2)
+
+    if nu > 0:
+        basis_u = build_hicks_henne_basis(x, upper_centers, power=power)
+        denom_u = np.max(np.abs(basis_u * nfac_u[None, :]), axis=1)
+        h_u = float(target_peak_normal) / np.maximum(denom_u, eps)
+    else:
+        h_u = np.zeros(0, dtype=float)
+
+    if nl > 0:
+        basis_l = build_hicks_henne_basis(x, lower_centers, power=power)
+        denom_l = np.max(np.abs(basis_l * nfac_l[None, :]), axis=1)
+        h_l = float(target_peak_normal) / np.maximum(denom_l, eps)
+    else:
+        h_l = np.zeros(0, dtype=float)
+
+    return np.concatenate([h_u, h_l])

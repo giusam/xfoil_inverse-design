@@ -2,10 +2,11 @@ from pathlib import Path
 
 import numpy as np
 
+from geometry import build_normal_peak_fd_steps
 from settings import SETTINGS
 from objective import make_objective
 from adaptive_candidate import _evaluate_objective_state, _rebuild_geometry_from_a
-from adaptive_fd import _adaptive_fd_step, _compute_full_aero_gradients
+from adaptive_fd import _compute_full_aero_gradients
 from adaptive_constraints import (
     _build_active_ikkt_system,
     _compute_geometric_gradients_analytic,
@@ -54,8 +55,7 @@ def _compute_full_objective_hessian(
     objective,
     a_base,
     bounds,
-    rel_step,
-    abs_step_floor,
+    step_vector,
     base_item=None,
 ):
     a_base = np.asarray(a_base, dtype=float)
@@ -70,72 +70,192 @@ def _compute_full_objective_hessian(
 
     f0 = _extract_objective_base(base_item)
 
+    # Cache locale per evitare eval duplicate
+    cache = {}
+
+    def _eval_item(delta_map):
+        a_try = a_base.copy()
+        for idx, delta in delta_map.items():
+            a_try[idx] += delta
+
+        key = tuple(np.round(a_try, 15))
+        if key not in cache:
+            cache[key] = _evaluate_objective_state(objective, a_try)
+        return cache[key]
+
+    def _eval_value(delta_map):
+        item = _eval_item(delta_map)
+        if item.get("status") != "OK":
+            return None
+        return _extract_objective_base(item)
+
     for i in range(ndv):
         ai = float(a_base[i])
         lo_i, hi_i = bounds[i]
-        hi_step = _adaptive_fd_step(ai, rel_step, abs_step_floor)
+        hi_step = float(step_vector[i])
 
-        if (ai + hi_step) > hi_i or (ai - hi_step) < lo_i:
-            continue
+        room_p_i = max(0.0, hi_i - ai)
+        room_m_i = max(0.0, ai - lo_i)
 
-        a_p = a_base.copy()
-        a_m = a_base.copy()
-        a_p[i] += hi_step
-        a_m[i] -= hi_step
+        has_i_c = (room_p_i >= hi_step) and (room_m_i >= hi_step)
+        has_i_f = (room_p_i >= hi_step)
+        has_i_b = (room_m_i >= hi_step)
+        has_i_ff2 = (room_p_i >= 2.0 * hi_step)
+        has_i_bb2 = (room_m_i >= 2.0 * hi_step)
 
-        item_p = _evaluate_objective_state(objective, a_p)
-        item_m = _evaluate_objective_state(objective, a_m)
+        # =========================================================
+        # DIAGONALE H[i,i]
+        # =========================================================
+        if has_i_c:
+            f_p = _eval_value({i: +hi_step})
+            f_m = _eval_value({i: -hi_step})
+            if f_p is not None and f_m is not None:
+                H[i, i] = (f_p - 2.0 * f0 + f_m) / (hi_step ** 2)
+        elif has_i_ff2:
+            # forward one-sided second derivative
+            f_p1 = _eval_value({i: +hi_step})
+            f_p2 = _eval_value({i: +2.0 * hi_step})
+            if f_p1 is not None and f_p2 is not None:
+                H[i, i] = (f0 - 2.0 * f_p1 + f_p2) / (hi_step ** 2)
+        elif has_i_bb2:
+            # backward one-sided second derivative
+            f_m1 = _eval_value({i: -hi_step})
+            f_m2 = _eval_value({i: -2.0 * hi_step})
+            if f_m1 is not None and f_m2 is not None:
+                H[i, i] = (f0 - 2.0 * f_m1 + f_m2) / (hi_step ** 2)
 
-        if item_p.get("status") == "OK" and item_m.get("status") == "OK":
-            f_p = _extract_objective_base(item_p)
-            f_m = _extract_objective_base(item_m)
-            H[i, i] = (f_p - 2.0 * f0 + f_m) / (hi_step ** 2)
-
+        # =========================================================
+        # TERMINI MISTI H[i,j], j>i
+        # =========================================================
         for j in range(i + 1, ndv):
             aj = float(a_base[j])
             lo_j, hi_j = bounds[j]
-            hj_step = _adaptive_fd_step(aj, rel_step, abs_step_floor)
+            hj_step = float(step_vector[j])
 
-            if (
-                (ai + hi_step) > hi_i or (ai - hi_step) < lo_i
-                or (aj + hj_step) > hi_j or (aj - hj_step) < lo_j
-            ):
-                continue
+            room_p_j = max(0.0, hi_j - aj)
+            room_m_j = max(0.0, aj - lo_j)
 
-            a_pp = a_base.copy()
-            a_pm = a_base.copy()
-            a_mp = a_base.copy()
-            a_mm = a_base.copy()
+            has_j_c = (room_p_j >= hj_step) and (room_m_j >= hj_step)
+            has_j_f = (room_p_j >= hj_step)
+            has_j_b = (room_m_j >= hj_step)
 
-            a_pp[i] += hi_step
-            a_pp[j] += hj_step
+            hij = None
 
-            a_pm[i] += hi_step
-            a_pm[j] -= hj_step
+            # -----------------------------------------------------
+            # 1) centrale-centrale
+            # -----------------------------------------------------
+            if has_i_c and has_j_c:
+                f_pp = _eval_value({i: +hi_step, j: +hj_step})
+                f_pm = _eval_value({i: +hi_step, j: -hj_step})
+                f_mp = _eval_value({i: -hi_step, j: +hj_step})
+                f_mm = _eval_value({i: -hi_step, j: -hj_step})
 
-            a_mp[i] -= hi_step
-            a_mp[j] += hj_step
+                if (
+                    f_pp is not None
+                    and f_pm is not None
+                    and f_mp is not None
+                    and f_mm is not None
+                ):
+                    hij = (f_pp - f_pm - f_mp + f_mm) / (4.0 * hi_step * hj_step)
 
-            a_mm[i] -= hi_step
-            a_mm[j] -= hj_step
+            # -----------------------------------------------------
+            # 2) i one-sided, j central
+            # -----------------------------------------------------
+            elif has_i_f and has_j_c:
+                f_php = _eval_value({i: +hi_step, j: +hj_step})
+                f_phm = _eval_value({i: +hi_step, j: -hj_step})
+                f_0hp = _eval_value({j: +hj_step})
+                f_0hm = _eval_value({j: -hj_step})
 
-            item_pp = _evaluate_objective_state(objective, a_pp)
-            item_pm = _evaluate_objective_state(objective, a_pm)
-            item_mp = _evaluate_objective_state(objective, a_mp)
-            item_mm = _evaluate_objective_state(objective, a_mm)
+                if (
+                    f_php is not None
+                    and f_phm is not None
+                    and f_0hp is not None
+                    and f_0hm is not None
+                ):
+                    hij = (f_php - f_phm - f_0hp + f_0hm) / (2.0 * hi_step * hj_step)
 
-            if (
-                item_pp.get("status") == "OK"
-                and item_pm.get("status") == "OK"
-                and item_mp.get("status") == "OK"
-                and item_mm.get("status") == "OK"
-            ):
-                f_pp = _extract_objective_base(item_pp)
-                f_pm = _extract_objective_base(item_pm)
-                f_mp = _extract_objective_base(item_mp)
-                f_mm = _extract_objective_base(item_mm)
+            elif has_i_b and has_j_c:
+                f_0hp = _eval_value({j: +hj_step})
+                f_0hm = _eval_value({j: -hj_step})
+                f_mhp = _eval_value({i: -hi_step, j: +hj_step})
+                f_mhm = _eval_value({i: -hi_step, j: -hj_step})
 
-                hij = (f_pp - f_pm - f_mp + f_mm) / (4.0 * hi_step * hj_step)
+                if (
+                    f_0hp is not None
+                    and f_0hm is not None
+                    and f_mhp is not None
+                    and f_mhm is not None
+                ):
+                    hij = (f_0hp - f_0hm - f_mhp + f_mhm) / (2.0 * hi_step * hj_step)
+
+            # -----------------------------------------------------
+            # 3) i central, j one-sided
+            # -----------------------------------------------------
+            elif has_i_c and has_j_f:
+                f_hph = _eval_value({i: +hi_step, j: +hj_step})
+                f_mph = _eval_value({i: -hi_step, j: +hj_step})
+                f_hp0 = _eval_value({i: +hi_step})
+                f_mp0 = _eval_value({i: -hi_step})
+
+                if (
+                    f_hph is not None
+                    and f_mph is not None
+                    and f_hp0 is not None
+                    and f_mp0 is not None
+                ):
+                    hij = (f_hph - f_mph - f_hp0 + f_mp0) / (2.0 * hi_step * hj_step)
+
+            elif has_i_c and has_j_b:
+                f_hp0 = _eval_value({i: +hi_step})
+                f_mp0 = _eval_value({i: -hi_step})
+                f_hmh = _eval_value({i: +hi_step, j: -hj_step})
+                f_mmh = _eval_value({i: -hi_step, j: -hj_step})
+
+                if (
+                    f_hp0 is not None
+                    and f_mp0 is not None
+                    and f_hmh is not None
+                    and f_mmh is not None
+                ):
+                    hij = (f_hp0 - f_mp0 - f_hmh + f_mmh) / (2.0 * hi_step * hj_step)
+
+            # -----------------------------------------------------
+            # 4) fallback completamente one-sided
+            # -----------------------------------------------------
+            elif has_i_f and has_j_f:
+                f_pf = _eval_value({i: +hi_step, j: +hj_step})
+                f_p0 = _eval_value({i: +hi_step})
+                f_0f = _eval_value({j: +hj_step})
+
+                if f_pf is not None and f_p0 is not None and f_0f is not None:
+                    hij = (f_pf - f_p0 - f_0f + f0) / (hi_step * hj_step)
+
+            elif has_i_f and has_j_b:
+                f_p0 = _eval_value({i: +hi_step})
+                f_pb = _eval_value({i: +hi_step, j: -hj_step})
+                f_0b = _eval_value({j: -hj_step})
+
+                if f_p0 is not None and f_pb is not None and f_0b is not None:
+                    hij = (f_p0 - f_pb - f0 + f_0b) / (hi_step * hj_step)
+
+            elif has_i_b and has_j_f:
+                f_0f = _eval_value({j: +hj_step})
+                f_bf = _eval_value({i: -hi_step, j: +hj_step})
+                f_b0 = _eval_value({i: -hi_step})
+
+                if f_0f is not None and f_bf is not None and f_b0 is not None:
+                    hij = (f_0f - f_bf - f0 + f_b0) / (hi_step * hj_step)
+
+            elif has_i_b and has_j_b:
+                f_b0 = _eval_value({i: -hi_step})
+                f_0b = _eval_value({j: -hj_step})
+                f_bb = _eval_value({i: -hi_step, j: -hj_step})
+
+                if f_b0 is not None and f_0b is not None and f_bb is not None:
+                    hij = (f0 - f_b0 - f_0b + f_bb) / (hi_step * hj_step)
+
+            if hij is not None:
                 H[i, j] = hij
                 H[j, i] = hij
 
@@ -148,8 +268,7 @@ def _compute_candidate_hessian_border(
     new_idx,
     old_to_new,
     bounds,
-    rel_step,
-    abs_step_floor,
+    step_vector,
     base_item=None,
 ):
     a_base = np.asarray(a_base, dtype=float)
@@ -167,7 +286,7 @@ def _compute_candidate_hessian_border(
 
     an = float(a_base[new_idx])
     lo_n, hi_n = bounds[new_idx]
-    hn = _adaptive_fd_step(an, rel_step, abs_step_floor)
+    hn = float(step_vector[new_idx])
 
     if (an + hn) <= hi_n and (an - hn) >= lo_n:
         a_p = a_base.copy()
@@ -190,7 +309,7 @@ def _compute_candidate_hessian_border(
     for idx_old_new in old_to_new:
         ai = float(a_base[idx_old_new])
         lo_i, hi_i = bounds[idx_old_new]
-        hi_step = _adaptive_fd_step(ai, rel_step, abs_step_floor)
+        hi_step = float(step_vector[idx_old_new])
 
         if (
             (ai + hi_step) > hi_i or (ai - hi_step) < lo_i
@@ -248,14 +367,7 @@ def _prepare_pred_level_context(
     current_best_error,
     workdir,
 ):
-    pred_rel_step = SETTINGS["optimization"].get(
-        "pred_fd_rel_step",
-        SETTINGS["optimization"]["fd_rel_step"],
-    )
-    pred_abs_step_floor = SETTINGS["optimization"].get(
-        "pred_fd_abs_step_floor",
-        SETTINGS["optimization"]["fd_abs_step_floor"],
-    )
+    pred_target_peak_normal = SETTINGS["optimization"]["pred_fd_target_peak_normal"]
 
     objective_old = make_objective(
         x=x,
@@ -284,13 +396,25 @@ def _prepare_pred_level_context(
         if spec.get("enabled", False):
             enabled_aero.append(name)
 
+    step_vector_old = build_normal_peak_fd_steps(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        upper_centers=upper_centers,
+        lower_centers=lower_centers,
+        a=a_opt,
+        target_peak_normal=pred_target_peak_normal,
+        power=SETTINGS["optimization"]["hh_power"],
+    )
+
     g_old, grad_metrics_old, _ = _compute_full_aero_gradients(
         objective=objective_old,
         a_base=a_opt,
         enabled_metric_names=enabled_aero,
         bounds=bounds_old,
-        rel_step=pred_rel_step,
-        abs_step_floor=pred_abs_step_floor,
+        rel_step=0.0,
+        abs_step_floor=0.0,
+        step_vector=step_vector_old,
         base_item=base_item_old,
     )
 
@@ -316,8 +440,7 @@ def _prepare_pred_level_context(
         objective=objective_old,
         a_base=a_opt,
         bounds=bounds_old,
-        rel_step=pred_rel_step,
-        abs_step_floor=pred_abs_step_floor,
+        step_vector=step_vector_old,
         base_item=base_item_old,
     )
 
@@ -328,8 +451,7 @@ def _prepare_pred_level_context(
         "G_k": None if G_old is None else G_old.copy(),
         "Z_k": Z_old.copy(),
         "H_k": H_old.copy(),
-        "pred_rel_step": pred_rel_step,
-        "pred_abs_step_floor": pred_abs_step_floor,
+        "pred_target_peak_normal": pred_target_peak_normal,
     }
 
 
@@ -398,8 +520,7 @@ def _score_candidate_pred(
             "active_entries": [],
         }
 
-    pred_rel_step = pred_context["pred_rel_step"]
-    pred_abs_step_floor = pred_context["pred_abs_step_floor"]
+    pred_target_peak_normal = pred_context["pred_target_peak_normal"]
 
     enabled_aero = []
     for name in ("CL", "CD", "CM"):
@@ -407,13 +528,25 @@ def _score_candidate_pred(
         if spec.get("enabled", False):
             enabled_aero.append(name)
 
+    step_vector = build_normal_peak_fd_steps(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        upper_centers=upper_centers,
+        lower_centers=lower_centers,
+        a=a_base,
+        target_peak_normal=pred_target_peak_normal,
+        power=SETTINGS["optimization"]["hh_power"],
+    )
+
     grad_j, grad_metrics_aero, _ = _compute_full_aero_gradients(
         objective=objective,
         a_base=a_base,
         enabled_metric_names=enabled_aero,
         bounds=bounds,
-        rel_step=pred_rel_step,
-        abs_step_floor=pred_abs_step_floor,
+        rel_step=0.0,
+        abs_step_floor=0.0,
+        step_vector=step_vector,
         base_item=base_item,
     )
 
@@ -444,8 +577,7 @@ def _score_candidate_pred(
         new_idx=new_idx,
         old_to_new=old_to_new,
         bounds=bounds,
-        rel_step=pred_rel_step,
-        abs_step_floor=pred_abs_step_floor,
+        step_vector=step_vector,
         base_item=base_item,
     )
 
