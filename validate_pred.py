@@ -15,13 +15,13 @@ from adaptive_candidate import _build_extended_space
 BASE_DIR = Path(__file__).resolve().parent
 SNAP_ROOT = BASE_DIR / SETTINGS.get("snapshots", {}).get("dir_name", "snapshots")
 
-SNAP_METHOD = "adapt_grad"   # "adapt_grad" | "adapt_ikkt" | "adapt_pred"
-SNAP_SEEDS = [0]
-SNAP_LEVELS = [0]   # es: [0, 3, 4, 5, 9] ; None -> tutti i level_*.npz trovati
+SNAP_METHOD = "adapt_ikkt"   # "adapt_grad" | "adapt_ikkt" | "adapt_pred"
+SNAP_SEEDS = [7]
+SNAP_LEVELS = [0,1,2,3]  # es: [0, 3, 4, 5, 9] ; None -> tutti i level_*.npz trovati
 
 CANDIDATES_TO_TEST = None
 WRITE_CSV = True
-
+ENABLE_SCORE_PRED = False   # True -> calcola anche score/rank PRED, False -> solo GRAD + IKKT + REAL
 
 def _restore_snapshot_constraint_targets(data):
     for metric_name in ("CL", "CD", "CM"):
@@ -259,17 +259,19 @@ def _validate_state(state, candidates, workdir):
     a_opt = state["a_opt"]
     err_current = float(state["err_opt"])
 
-    pred_context = _prepare_pred_level_context(
-        x=x,
-        yu_init=yu_init,
-        yl_init=yl_init,
-        cp_target=cp_target,
-        upper_centers=upper_centers,
-        lower_centers=lower_centers,
-        a_opt=a_opt,
-        current_best_error=err_current,
-        workdir=Path(workdir) / "pred_context",
-    )
+    pred_context = None
+    if ENABLE_SCORE_PRED:
+        pred_context = _prepare_pred_level_context(
+            x=x,
+            yu_init=yu_init,
+            yl_init=yl_init,
+            cp_target=cp_target,
+            upper_centers=upper_centers,
+            lower_centers=lower_centers,
+            a_opt=a_opt,
+            current_best_error=err_current,
+            workdir=Path(workdir) / "pred_context",
+        )
 
     rows = []
     for cand in candidates:
@@ -295,23 +297,35 @@ def _validate_state(state, candidates, workdir):
         workdir=Path(workdir) / "score_ikkt",
         pred_context=None,
     )
-    pred_scores = _compute_indicator_scores(
-        state=state,
-        candidates=candidates,
-        indicator="PRED",
-        workdir=Path(workdir) / "score_pred",
-        pred_context=pred_context,
-    )
+
+    pred_scores = None
+    if ENABLE_SCORE_PRED:
+        pred_scores = _compute_indicator_scores(
+            state=state,
+            candidates=candidates,
+            indicator="PRED",
+            workdir=Path(workdir) / "score_pred",
+            pred_context=pred_context,
+        )
 
     for row in rows:
         key = _candidate_key(row["side"], row["x"])
         row["score_grad"] = float(grad_scores[key])
         row["score_ikkt"] = float(ikkt_scores[key])
-        row["score_pred"] = float(pred_scores[key])
+
+        if ENABLE_SCORE_PRED:
+            row["score_pred"] = float(pred_scores[key])
+        else:
+            row["score_pred"] = np.nan
 
     _assign_rank(rows, "score_grad", "rank_grad")
     _assign_rank(rows, "score_ikkt", "rank_ikkt")
-    _assign_rank(rows, "score_pred", "rank_pred")
+
+    if ENABLE_SCORE_PRED:
+        _assign_rank(rows, "score_pred", "rank_pred")
+    else:
+        for row in rows:
+            row["rank_pred"] = np.nan
 
     print("\n===== REAL RE-OPT FOR EACH CANDIDATE =====")
     for row in rows:
@@ -363,6 +377,18 @@ def _validate_state(state, candidates, workdir):
     rows.sort(key=lambda item: (float(item["x"]), _side_order(item["side"])))
     return rows
 
+def _fmt_score_or_blank(value):
+    value = float(value)
+    if np.isfinite(value):
+        return f"{value:.6e}"
+    return ""
+
+
+def _fmt_rank_or_blank(value):
+    value = float(value)
+    if np.isfinite(value):
+        return str(int(value))
+    return ""
 
 def _write_recap_csv(csv_path, snapshot_name, seed, ndv_before, err_before, rows):
     csv_path = Path(csv_path)
@@ -386,6 +412,7 @@ def _write_recap_csv(csv_path, snapshot_name, seed, ndv_before, err_before, rows
         f.write(f"# seed = {seed}\n")
         f.write(f"# ndv_before = {ndv_before}\n")
         f.write(f"# err_before = {err_before:.6e}\n")
+        f.write(f"# enable_score_pred = {ENABLE_SCORE_PRED}\n")
         f.write("\n")
 
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -400,8 +427,8 @@ def _write_recap_csv(csv_path, snapshot_name, seed, ndv_before, err_before, rows
                     "rank_grad": int(row["rank_grad"]),
                     "score_ikkt": f"{float(row['score_ikkt']):.6e}",
                     "rank_ikkt": int(row["rank_ikkt"]),
-                    "score_pred": f"{float(row['score_pred']):.6e}",
-                    "rank_pred": int(row["rank_pred"]),
+                    "score_pred": _fmt_score_or_blank(row["score_pred"]),
+                    "rank_pred": _fmt_rank_or_blank(row["rank_pred"]),
                     "delta_real": f"{float(row['delta_real']):.6e}",
                     "rank_real": int(row["rank_real"]),
                 }
@@ -435,6 +462,7 @@ def main():
         print(f"seed               = {seed}")
         print(f"ndv_before         = {snapshot['ndv_total']}")
         print(f"err_before         = {snapshot['err_opt']:.6e}")
+        print(f"enable_score_pred  = {ENABLE_SCORE_PRED}")
         print("============================================================")
 
         candidates = _build_candidates(snapshot["upper_centers"], snapshot["lower_centers"])

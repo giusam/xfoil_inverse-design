@@ -92,7 +92,13 @@ def main():
         shutil.rmtree(base_workdir)
     base_workdir.mkdir(parents=True, exist_ok=True)
 
-    n_seeds = int(SETTINGS["initial_shape"]["n_seeds"])
+    seed_list = SETTINGS["initial_shape"].get("seed_list", None)
+    if seed_list is None:
+        n_seeds = int(SETTINGS["initial_shape"]["n_seeds"])
+        seeds_to_run = list(range(n_seeds))
+    else:
+        seeds_to_run = [int(s) for s in seed_list]
+
     do_static = bool(SETTINGS.get("run", {}).get("do_static", True))
     adaptive_modes = _get_active_adaptive_modes()
 
@@ -101,7 +107,7 @@ def main():
             "Activate at least one among run.do_static, run.do_adaptive_grad, run.do_adaptive_ikkt."
         )
 
-    for seed in range(n_seeds):
+    for seed in seeds_to_run:
         print("==============================")
         print(f"RUN FOR SEED = {seed}")
         print("==============================")
