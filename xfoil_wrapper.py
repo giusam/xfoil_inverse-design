@@ -75,8 +75,35 @@ def read_xfoil_cp(path):
     }
 
 
-def run_xfoil(airfoil_dat, alpha_deg, reynolds, xfoil_iter, timeout, working_dir):
+def run_xfoil(
+    airfoil_dat,
+    alpha_deg,
+    reynolds,
+    xfoil_iter,
+    timeout,
+    working_dir,
+    xtr_upper=None,
+    xtr_lower=None,
+):
     import signal
+    from settings import SETTINGS
+
+    xfoil_cfg = SETTINGS.get("xfoil", {})
+
+    if xtr_upper is None:
+        xtr_upper = float(xfoil_cfg.get("xtr_upper", 1.0))
+    else:
+        xtr_upper = float(xtr_upper)
+
+    if xtr_lower is None:
+        xtr_lower = float(xfoil_cfg.get("xtr_lower", 1.0))
+    else:
+        xtr_lower = float(xtr_lower)
+
+    if not (0.0 <= xtr_upper <= 1.0):
+        raise ValueError(f"xtr_upper must be in [0, 1], got {xtr_upper}")
+    if not (0.0 <= xtr_lower <= 1.0):
+        raise ValueError(f"xtr_lower must be in [0, 1], got {xtr_lower}")
 
     workdir = Path(working_dir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +124,9 @@ def run_xfoil(airfoil_dat, alpha_deg, reynolds, xfoil_iter, timeout, working_dir
         "PANE\n"
         "OPER\n"
         f"VISC {reynolds}\n"
+        "VPAR\n"
+        f"XTR {xtr_upper} {xtr_lower}\n"
+        "\n"
         f"ITER {xfoil_iter}\n"
         "PACC\n"
         f"{local_polar.name}\n"

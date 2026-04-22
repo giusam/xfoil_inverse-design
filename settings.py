@@ -17,6 +17,8 @@ SETTINGS = {
         "xfoil_iter": 300,
         "timeout": 60,
         "working_dir": Path("run_debug"),
+        "xtr_upper": 0.03,
+        "xtr_lower": 0.03,
     },
 
     "snapshots": {
@@ -85,12 +87,12 @@ SETTINGS = {
         "random_seed": 2,
         "random_amp": 0.1,
         "n_seeds": 3,
-        "seed_list": [0,1,2],
+        "seed_list": [9],
     },
 
     "optimization": {
         "hh_power": 6,
-        "n_hh_static": 20,
+        "n_hh_static": 16,
         "bounds": (-0.01, 0.01),
         "maxiter": 200,
         "ftol": 1.0e-8,
@@ -102,7 +104,7 @@ SETTINGS = {
         "adaptive": {
             "tol_active": 1.0e-3,
             "n0": 8,
-            "n_final": 20,
+            "n_final": 16,
             "n_add_per_level": 1,
             "growth_ratio": 1.25,
             "xmin": 0.05,
