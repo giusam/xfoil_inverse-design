@@ -66,6 +66,8 @@ def _get_active_adaptive_modes():
         modes.append("IKKT")
     if bool(run_cfg.get("do_adaptive_pred", False)):
         modes.append("PRED")
+    if bool(run_cfg.get("do_adaptive_oracle", False)):
+        modes.append("ORACLE")
     return modes
 
 
@@ -104,7 +106,7 @@ def main():
 
     if not do_static and len(adaptive_modes) == 0:
         raise RuntimeError(
-            "Activate at least one among run.do_static, run.do_adaptive_grad, run.do_adaptive_ikkt."
+            "Activate at least one among run.do_static, run.do_adaptive_grad, run.do_adaptive_ikkt, run.do_adaptive_pred, run.do_adaptive_oracle."
         )
 
     for seed in seeds_to_run:

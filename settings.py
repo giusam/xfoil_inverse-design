@@ -6,8 +6,9 @@ SETTINGS = {
     "run": {
         "do_static": True,
         "do_adaptive_grad": True,
-        "do_adaptive_ikkt": True,
+        "do_adaptive_ikkt": False,
         "do_adaptive_pred": False,
+        "do_adaptive_oracle": False,
     },
 
     "xfoil": {
@@ -30,7 +31,7 @@ SETTINGS = {
 
     "constraints": {
         "CL": {
-            "enabled": True,
+            "enabled": False,
             "kind": "eq",
             "target": None,
             "alpha": 0.5,
@@ -82,14 +83,14 @@ SETTINGS = {
     "initial_shape": {
         "bernstein_order": 15,
         "random_seed": 2,
-        "random_amp": 0.04,
+        "random_amp": 0.1,
         "n_seeds": 3,
-        "seed_list": [ 7, 8, 9],
+        "seed_list": [0,1,2],
     },
 
     "optimization": {
-        "hh_power": 4,
-        "n_hh_static": 16,
+        "hh_power": 6,
+        "n_hh_static": 20,
         "bounds": (-0.01, 0.01),
         "maxiter": 200,
         "ftol": 1.0e-8,
@@ -100,8 +101,8 @@ SETTINGS = {
         "penalty_factor": 20.0,
         "adaptive": {
             "tol_active": 1.0e-3,
-            "n0": 6,
-            "n_final": 16,
+            "n0": 8,
+            "n_final": 20,
             "n_add_per_level": 1,
             "growth_ratio": 1.25,
             "xmin": 0.05,

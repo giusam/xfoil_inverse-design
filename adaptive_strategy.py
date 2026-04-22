@@ -113,6 +113,82 @@ def _print_candidate_diagnostics(scored, topk=12):
     if not found_pair:
         print("No same-x upper/lower pairs in current candidate set.")
 
+def _score_candidate_oracle(
+    x,
+    yu_init,
+    yl_init,
+    cp_target,
+    active_upper,
+    active_lower,
+    active_a,
+    candidate,
+    current_best_error,
+    workdir,
+    level_ndv,
+):
+    side = str(candidate["side"]).upper()
+    xc = float(candidate["x"])
+
+    new_upper = sorted(list(active_upper))
+    new_lower = sorted(list(active_lower))
+
+    if side == "UPPER":
+        new_upper.append(xc)
+    elif side == "LOWER":
+        new_lower.append(xc)
+    else:
+        raise ValueError(f"Unknown candidate side: {side}")
+
+    new_upper = sorted(set(new_upper))
+    new_lower = sorted(set(new_lower))
+
+    new_a0 = lift_a_to_new_side_centers(
+        old_upper=active_upper,
+        old_lower=active_lower,
+        old_a=active_a,
+        new_upper=new_upper,
+        new_lower=new_lower,
+    )
+
+    label = f"oracle_L{int(level_ndv):03d}_{side}_{xc:.6f}".replace(".", "p")
+    oracle_workdir = Path(workdir) / "oracle_candidate_scoring" / f"level_{int(level_ndv):03d}" / label
+
+
+    out = optimize_for_centers(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        cp_target=cp_target,
+        upper_centers=new_upper,
+        lower_centers=new_lower,
+        a0=new_a0,
+        label=label,
+        current_best_error=current_best_error,
+        workdir=oracle_workdir,
+    )
+
+    delta_real = float(current_best_error - out["err_opt"])
+
+    print(
+        f"SCORE[ORACLE] side={side} candidate={xc:.6f}  "
+        f"delta_real={delta_real:.6e}  "
+        f"err_after={float(out['err_opt']):.6e}  "
+        f"evals={int(out['n_xfoil_calls_total'])}"
+    )
+
+    return {
+        "side": side,
+        "x": xc,
+        "score": delta_real,
+        "component": delta_real,
+        "raw_grad": np.nan,
+        "active_names": [],
+        "lambda": np.zeros(0),
+        "n_evals": int(out["n_xfoil_calls_total"]),
+        "indicator": "ORACLE",
+        "mode": "ORACLE_REAL",
+        "err_after": float(out["err_opt"]),
+    }
 
 def run_adaptive_strategy(
     x,
@@ -248,22 +324,39 @@ def run_adaptive_strategy(
                 workdir=Path(workdir) / "adaptive_candidate_scoring",
             )
 
+        current_ndv = len(upper_centers) + len(lower_centers)
         scored = []
         for cand in candidates:
-            info = score_candidate(
-                x=x,
-                yu_init=yu_init,
-                yl_init=yl_init,
-                cp_target=cp_target,
-                active_upper=upper_centers,
-                active_lower=lower_centers,
-                active_a=adaptive_out["a_opt"],
-                candidate=cand,
-                current_best_error=current_best_error,
-                workdir=Path(workdir) / "adaptive_candidate_scoring",
-                indicator=indicator,
-                pred_context=pred_context,
-            )
+            if str(indicator).upper() == "ORACLE":
+                info = _score_candidate_oracle(
+                    x=x,
+                    yu_init=yu_init,
+                    yl_init=yl_init,
+                    cp_target=cp_target,
+                    active_upper=upper_centers,
+                    active_lower=lower_centers,
+                    active_a=adaptive_out["a_opt"],
+                    candidate=cand,
+                    current_best_error=current_best_error,
+                    workdir=Path(workdir),
+                    level_ndv=current_ndv
+                )
+            else:
+                info = score_candidate(
+                    x=x,
+                    yu_init=yu_init,
+                    yl_init=yl_init,
+                    cp_target=cp_target,
+                    active_upper=upper_centers,
+                    active_lower=lower_centers,
+                    active_a=adaptive_out["a_opt"],
+                    candidate=cand,
+                    current_best_error=current_best_error,
+                    workdir=Path(workdir) / "adaptive_candidate_scoring",
+                    indicator=indicator,
+                    pred_context=pred_context,
+                )
+
             n_scoring_evals_total += info["n_evals"]
             n_xfoil_calls_total += info["n_evals"]
 
@@ -284,7 +377,7 @@ def run_adaptive_strategy(
         scored.sort(key=lambda item: (-item["score"], item["x"]))
         _print_candidate_diagnostics(scored, topk=12)
 
-        current_ndv = len(upper_centers) + len(lower_centers)
+        
         n_remaining = n_final - current_ndv
         n_add = _compute_adaptive_nadd(current_ndv, len(scored))
         n_add = min(n_add, n_remaining)
