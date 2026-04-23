@@ -356,8 +356,11 @@ def _build_geometry_from_a_factory(x, yu_init, yl_init, upper_centers, lower_cen
     def _build_geometry_from_a(a):
         nu = len(upper_centers)
         nl = len(lower_centers)
-        a_upper = np.asarray(a[:nu], dtype=float)
-        a_lower = np.asarray(a[nu:nu + nl], dtype=float)
+
+        # NON forzare dtype=float: serve preservare l'eventuale parte immaginaria
+        a_upper = np.asarray(a[:nu])
+        a_lower = np.asarray(a[nu:nu + nl])
+
         return apply_hicks_henne_deformation(
             x=x,
             yu_base=yu_init,
@@ -646,9 +649,11 @@ def build_slsqp_all_constraints(
     xfoil_iter,
     timeout,
     working_dir,
+    record_aero_call=None,
 ):
     from geometry import write_dat
     from aero_wrapper import run_aero
+    from cmplxfoil_wrapper import run_cmplxfoil_coords
     from settings import SETTINGS
 
     constraints = _build_geometric_constraint_functions(
@@ -681,6 +686,20 @@ def build_slsqp_all_constraints(
     metrics_cache = {}
     grad_cache = {}
 
+    aero_backend = str(SETTINGS.get("aero", {}).get("backend", "xfoil")).strip().lower()
+    deriv_mode = str(SETTINGS.get("aero", {}).get("derivatives", "fd")).strip().lower()
+
+    if deriv_mode not in {"fd", "cs"}:
+        raise ValueError(f"Unknown derivative mode: {deriv_mode}")
+    if deriv_mode == "cs" and aero_backend != "cmplxfoil":
+        raise RuntimeError(
+            "CS aerodynamic constraint Jacobians require aero.backend='cmplxfoil'."
+        )
+
+    cmplxfoil_template_dat = working_dir / "_cmplxfoil_template_airfoil.dat"
+    cmplxfoil_real_session_key = f"{working_dir.resolve()}::constraints_real"
+    cmplxfoil_cs_session_key = f"{working_dir.resolve()}::constraints_cs"
+
     def _evaluate_aero_metrics(a):
         key = tuple(np.round(np.asarray(a, dtype=float), 12))
 
@@ -691,19 +710,49 @@ def build_slsqp_all_constraints(
         k = eval_counter["k"]
 
         yu, yl = _build_geometry_from_a(a)
-        airfoil_dat = working_dir / f"constraint_airfoil_{k:05d}.dat"
-        run_dir = working_dir / f"constraint_run_{k:05d}"
 
-        write_dat(airfoil_dat, x, yu, yl, name=f"CONSTRAINT_{k:05d}")
+        if aero_backend == "cmplxfoil":
+            if not cmplxfoil_template_dat.exists():
+                write_dat(
+                    cmplxfoil_template_dat,
+                    x,
+                    np.real(yu_init),
+                    np.real(yl_init),
+                    name="CMPLXFOIL_TEMPLATE",
+                )
 
-        res = run_aero(
-            airfoil_dat=airfoil_dat,
-            alpha_deg=alpha_deg,
-            reynolds=reynolds,
-            xfoil_iter=xfoil_iter,
-            timeout=timeout,
-            working_dir=run_dir,
-        )
+            run_dir = working_dir / "cmplxfoil_constraints_real_run"
+
+            if record_aero_call is not None:
+                record_aero_call()
+            res = run_cmplxfoil_coords(
+                airfoil_dat=cmplxfoil_template_dat,
+                x=x,
+                yu=yu,
+                yl=yl,
+                alpha_deg=alpha_deg,
+                reynolds=reynolds,
+                xfoil_iter=xfoil_iter,
+                timeout=timeout,
+                working_dir=run_dir,
+                session_key=cmplxfoil_real_session_key,
+            )
+        else:
+            airfoil_dat = working_dir / f"constraint_airfoil_{k:05d}.dat"
+            run_dir = working_dir / f"constraint_run_{k:05d}"
+
+            write_dat(airfoil_dat, x, yu, yl, name=f"CONSTRAINT_{k:05d}")
+
+            if record_aero_call is not None:
+                record_aero_call()
+            res = run_aero(
+                airfoil_dat=airfoil_dat,
+                alpha_deg=alpha_deg,
+                reynolds=reynolds,
+                xfoil_iter=xfoil_iter,
+                timeout=timeout,
+                working_dir=run_dir,
+            )
 
         if not res["success"] or res["polar"] is None:
             metrics_cache[key] = None
@@ -713,11 +762,87 @@ def build_slsqp_all_constraints(
         metrics_cache[key] = metrics
         return metrics
 
+    def _evaluate_aero_metrics_cs(a, metric_names):
+        if aero_backend != "cmplxfoil":
+            raise RuntimeError("CS constraint gradients require aero.backend='cmplxfoil'.")
+
+        yu, yl = _build_geometry_from_a(a)
+        thickness = yu - yl
+        thickness_real = np.real(thickness)
+        thickness_internal = thickness_real[1:-1]
+        thickness_tol = -1.0e-10
+
+        if np.any(thickness_internal < thickness_tol):
+            return None
+
+        if not cmplxfoil_template_dat.exists():
+            write_dat(
+                cmplxfoil_template_dat,
+                x,
+                np.real(yu_init),
+                np.real(yl_init),
+                name="CMPLXFOIL_TEMPLATE",
+            )
+
+        run_dir = working_dir / "cmplxfoil_constraints_cs_run"
+
+        if record_aero_call is not None:
+            record_aero_call()
+        res = run_cmplxfoil_coords(
+            airfoil_dat=cmplxfoil_template_dat,
+            x=x,
+            yu=yu,
+            yl=yl,
+            alpha_deg=alpha_deg,
+            reynolds=reynolds,
+            xfoil_iter=xfoil_iter,
+            timeout=timeout,
+            working_dir=run_dir,
+            session_key=cmplxfoil_cs_session_key,
+        )
+
+        if not res["success"] or res.get("polar") is None:
+            return None
+
+        polar = res["polar"]
+        out = {}
+
+        for name in metric_names:
+            if name == "CL":
+                out[name] = polar["CL"]
+            elif name == "CD":
+                out[name] = polar["CD"]
+            elif name == "CM":
+                out[name] = polar["CM"]
+            else:
+                raise ValueError(f"Unsupported aerodynamic constraint for CS: {name}")
+
+        return out
+
     def _evaluate_aero_metric_gradient(metric_name, a):
         key = (metric_name, tuple(np.round(np.asarray(a, dtype=float), 12)))
 
         if key in grad_cache:
             return grad_cache[key]
+
+        if deriv_mode == "cs":
+            h = 1.0e-200
+            a0 = np.asarray(a, dtype=float)
+            grad = np.zeros_like(a0, dtype=float)
+
+            for j in range(len(a0)):
+                a_cs = np.asarray(a0, dtype=complex).copy()
+                a_cs[j] += 1j * h
+
+                metrics_cs = _evaluate_aero_metrics_cs(a_cs, [metric_name])
+
+                if metrics_cs is None:
+                    grad[j] = 0.0
+                else:
+                    grad[j] = np.imag(metrics_cs[metric_name]) / h
+
+            grad_cache[key] = grad
+            return grad
 
         def scalar_value(z):
             metrics = _evaluate_aero_metrics(z)

@@ -3,10 +3,11 @@ import shutil
 
 import numpy as np
 
-from settings import SETTINGS
+import sys
+from settings import SETTINGS, apply_cfg_overrides
 from geometry import build_naca0012_surfaces, build_random_initial_geometry, write_dat
 from xfoil_wrapper import clean_workdir, run_xfoil
-from cmplxfoil_wrapper import run_cmplxfoil
+from cmplxfoil_wrapper import run_cmplxfoil, clear_cmplxfoil_solver_cache
 from aero_wrapper import run_aero
 from cp_utils import split_upper_lower_cp_from_x
 from objective import total_cp_error
@@ -50,7 +51,18 @@ def _static_placeholder(err_init, init_res):
         "result": None,
         "n_objective_evals": 0,
         "n_xfoil_calls_total": 0,
+        "n_aero_calls_total_all_phases": 0,
+        "n_setup_aero_calls": 0,
+        "n_postprocess_aero_calls": 0,
+        "n_optimization_aero_calls_total": 0,
+        "n_optimization_function_aero_calls": 0,
+        "n_optimization_gradient_aero_calls": 0,
+        "n_function_evals": 0,
+        "n_gradient_evals": 0,
         "objective_history": [],
+        "function_eval_history": [],
+        "gradient_eval_history": [],
+        "aero_call_counter_by_phase": {},
         "ndv_total": 0,
         "penalty_value": 0.0,
         "n_geometric_constraints": 0,
@@ -88,6 +100,13 @@ def run_target_aero(*args, **kwargs):
     raise ValueError(f"Unknown target backend: {target_backend}")
 
 def main():
+    if len(sys.argv) > 2:
+        raise SystemExit("Usage: python main_inverse_static.py [case.cfg]")
+
+    if len(sys.argv) == 2:
+        apply_cfg_overrides(sys.argv[1])
+        print(f"Loaded CFG overrides from: {sys.argv[1]}")
+
     base_dir = Path(__file__).resolve().parent
 
     for pattern in ("a_history_seed_*.dat", "grad_history_seed_*.dat"):
@@ -124,6 +143,7 @@ def main():
         raise RuntimeError(
             "Activate at least one among run.do_static, run.do_adaptive_grad, run.do_adaptive_ikkt, run.do_adaptive_pred, run.do_adaptive_oracle."
         )
+    import gc
 
     for seed in seeds_to_run:
         print("==============================")
@@ -325,6 +345,19 @@ def main():
                 print(f"Snapshots written in: {persistent_snapshot_dir}")
 
         cleanup_debug_files(workdir)
+
+        clear_cmplxfoil_solver_cache()
+
+        for name in [
+            "static_out", "adaptive_runs",
+            "target_res", "init_res",
+            "cp_target", "cp_init",
+            "x", "yu_target", "yl_target", "yu_init", "yl_init",
+        ]:
+            if name in locals():
+                del locals()[name]
+
+        gc.collect() 
 
     if len(results) == 0:
         print("Nessun seed completato con successo.")

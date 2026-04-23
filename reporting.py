@@ -8,8 +8,12 @@ from geometry import write_dat
 from plotting import (
     plot_3way_geometry_comparison,
     plot_3way_cp_comparison,
-    plot_error_vs_evals_with_refine,
-    plot_error_vs_evals_full,
+    plot_error_vs_function_evals_static,
+    plot_error_vs_gradient_evals_static,
+    plot_error_vs_function_evals_adaptive,
+    plot_error_vs_gradient_evals_adaptive,
+    plot_error_vs_function_evals_compare,
+    plot_error_vs_gradient_evals_compare,
 )
 
 
@@ -58,6 +62,54 @@ def _fmt_or_skipped(value, skipped):
 
 def _mode_title(mode_key):
     return mode_key.upper()
+
+
+def _method_label(mode_key=None, is_static=False):
+    if is_static:
+        return "STATIC"
+    return f"ADAPT_{str(mode_key).upper()}"
+
+
+def _build_static_series(initial_err, history, x_key, y_key):
+    xs = [0]
+    ys = [float(initial_err)]
+
+    for item in history:
+        if item.get("status") != "OK":
+            continue
+        yval = item.get(y_key)
+        if yval is None:
+            continue
+        yval = float(yval)
+        if not np.isfinite(yval) or yval <= 0.0:
+            continue
+        xs.append(int(item[x_key]))
+        ys.append(yval)
+
+    return {"x": xs, "y": ys}
+
+
+def _build_adaptive_series(initial_err, history_full_opt, history_key, x_key, y_key, offset_end_key):
+    xs = [0]
+    ys = [float(initial_err)]
+    offset_start = 0
+
+    for level in history_full_opt:
+        for item in level.get(history_key, []):
+            if item.get("status") != "OK":
+                continue
+            yval = item.get(y_key)
+            if yval is None:
+                continue
+            yval = float(yval)
+            if not np.isfinite(yval) or yval <= 0.0:
+                continue
+            xs.append(int(offset_start + item[x_key]))
+            ys.append(yval)
+
+        offset_start = int(level.get(offset_end_key, offset_start))
+
+    return {"x": xs, "y": ys}
 
 def _write_cp_from_res(res, dst_path):
     if res is None or res.get("cp_data") is None:
@@ -180,8 +232,10 @@ def _build_seed_summary_text(seed, err_init, init_res, static_out, adaptive_runs
 
     lines.extend(
         [
-            f"Static objective evals      = {'SKIPPED' if static_skipped else static_out['n_objective_evals']}",
-            f"Static aero calls          = {'SKIPPED' if static_skipped else static_out['n_xfoil_calls_total']}",
+            f"Static scoring aero calls      = {'SKIPPED' if static_skipped else 0}",
+            f"Static optimization aero calls = {'SKIPPED' if static_skipped else static_out['n_optimization_aero_calls_total']}",
+            f"Static function evaluations    = {'SKIPPED' if static_skipped else static_out['n_function_evals']}",
+            f"Static gradient evaluations    = {'SKIPPED' if static_skipped else static_out['n_gradient_evals']}",
         ]
     )
 
@@ -189,9 +243,10 @@ def _build_seed_summary_text(seed, err_init, init_res, static_out, adaptive_runs
         tag = _mode_title(mode_key)
         lines.extend(
             [
-                f"{tag} evals opt        = {out['n_optimization_evals_total']}",
-                f"{tag} evals score      = {out['n_scoring_evals_total']}",
-                f"{tag} aero calls       = {out['n_total_evals']}",
+                f"{tag} scoring aero calls      = {out['n_scoring_aero_calls_total']}",
+                f"{tag} optimization aero calls = {out['n_optimization_aero_calls_total']}",
+                f"{tag} function evaluations    = {out['n_function_evals_total']}",
+                f"{tag} gradient evaluations    = {out['n_gradient_evals_total']}",
             ]
         )
 
@@ -240,6 +295,8 @@ def save_seed_outputs(
     summary_dir.mkdir(parents=True, exist_ok=True)
 
     static_skipped = bool(static_out.get("is_skipped", False))
+    function_compare_series = []
+    gradient_compare_series = []
 
     if not static_skipped:
         plot_3way_geometry_comparison(
@@ -260,6 +317,41 @@ def save_seed_outputs(
             static_out["cp_opt"],
             title="Cp: Target vs Initial vs Static",
             savepath=summary_dir / "cp_target_initial_static.png",
+        )
+
+        plot_error_vs_function_evals_static(
+            initial_err=err_init,
+            function_eval_history=static_out["function_eval_history"],
+            savepath=summary_dir / "error_vs_function_evals_static.png",
+        )
+
+        plot_error_vs_gradient_evals_static(
+            initial_err=err_init,
+            gradient_eval_history=static_out["gradient_eval_history"],
+            savepath=summary_dir / "error_vs_gradient_evals_static.png",
+        )
+
+        function_compare_series.append(
+            {
+                "label": _method_label(is_static=True),
+                **_build_static_series(
+                    initial_err=err_init,
+                    history=static_out["function_eval_history"],
+                    x_key="cumulative_function_evals",
+                    y_key="objective_base",
+                ),
+            }
+        )
+        gradient_compare_series.append(
+            {
+                "label": _method_label(is_static=True),
+                **_build_static_series(
+                    initial_err=err_init,
+                    history=static_out["gradient_eval_history"],
+                    x_key="cumulative_gradient_evals",
+                    y_key="objective_base_at_grad_point",
+                ),
+            }
         )
 
     for mode_key, out in adaptive_runs.items():
@@ -283,20 +375,57 @@ def save_seed_outputs(
             savepath=summary_dir / f"cp_target_initial_{mode_key}.png",
         )
 
-        plot_error_vs_evals_with_refine(
+        plot_error_vs_function_evals_adaptive(
             initial_err=err_init,
-            static_calls=None if static_skipped else static_out["n_xfoil_calls_total"],
-            static_err=None if static_skipped else static_out["err_opt"],
-            adaptive_history=out["history"],
-            adaptive_evals=out["history_evals"],
-            savepath=summary_dir / f"error_vs_evals_{mode_key}.png",
+            history_full_opt=out["history_full_opt"],
+            savepath=summary_dir / f"error_vs_function_evals_{mode_key}.png",
+            label=_method_label(mode_key),
         )
 
-        plot_error_vs_evals_full(
+        plot_error_vs_gradient_evals_adaptive(
             initial_err=err_init,
-            static_history=[] if static_skipped else static_out["objective_history"],
-            adaptive_history_full=out["history_full"],
-            savepath=summary_dir / f"error_vs_evals_full_{mode_key}.png",
+            history_full_opt=out["history_full_opt"],
+            savepath=summary_dir / f"error_vs_gradient_evals_{mode_key}.png",
+            label=_method_label(mode_key),
+        )
+
+        function_compare_series.append(
+            {
+                "label": _method_label(mode_key),
+                **_build_adaptive_series(
+                    initial_err=err_init,
+                    history_full_opt=out["history_full_opt"],
+                    history_key="function_eval_history",
+                    x_key="cumulative_function_evals",
+                    y_key="objective_base",
+                    offset_end_key="function_eval_offset_end",
+                ),
+            }
+        )
+        gradient_compare_series.append(
+            {
+                "label": _method_label(mode_key),
+                **_build_adaptive_series(
+                    initial_err=err_init,
+                    history_full_opt=out["history_full_opt"],
+                    history_key="gradient_eval_history",
+                    x_key="cumulative_gradient_evals",
+                    y_key="objective_base_at_grad_point",
+                    offset_end_key="gradient_eval_offset_end",
+                ),
+            }
+        )
+
+    if len(function_compare_series) > 0:
+        plot_error_vs_function_evals_compare(
+            function_compare_series,
+            savepath=summary_dir / "error_vs_function_evals_compare.png",
+        )
+
+    if len(gradient_compare_series) > 0:
+        plot_error_vs_gradient_evals_compare(
+            gradient_compare_series,
+            savepath=summary_dir / "error_vs_gradient_evals_compare.png",
         )
 
     write_dat(summary_dir / "target_airfoil.dat", x, yu_target, yl_target, name="TARGET_NACA0012")
@@ -346,11 +475,17 @@ def make_seed_result(seed, err_init, static_out, adaptive_runs):
         "seed": seed,
         "err_init": err_init,
         "static_err": static_out["err_opt"],
-        "static_xfoil_calls": static_out["n_xfoil_calls_total"],
+        "static_scoring_aero_calls": 0,
+        "static_optimization_aero_calls": static_out["n_optimization_aero_calls_total"],
+        "static_function_evals": static_out["n_function_evals"],
+        "static_gradient_evals": static_out["n_gradient_evals"],
     }
     for mode_key, out in adaptive_runs.items():
         row[f"{mode_key}_err"] = out["err_opt"]
-        row[f"{mode_key}_xfoil_calls"] = out["n_total_evals"]
+        row[f"{mode_key}_scoring_aero_calls"] = out["n_scoring_aero_calls_total"]
+        row[f"{mode_key}_optimization_aero_calls"] = out["n_optimization_aero_calls_total"]
+        row[f"{mode_key}_function_evals"] = out["n_function_evals_total"]
+        row[f"{mode_key}_gradient_evals"] = out["n_gradient_evals_total"]
     return row
 
 
@@ -388,10 +523,25 @@ def write_global_summary(base_workdir, results):
     global_summary_path = Path(base_workdir) / "global_summary.csv"
     mode_keys = stats["mode_keys"]
 
-    header = ["seed", "err_init", "static_err"]
+    header = [
+        "seed",
+        "err_init",
+        "static_err",
+        "static_scoring_aero_calls",
+        "static_optimization_aero_calls",
+        "static_function_evals",
+        "static_gradient_evals",
+    ]
     for mode_key in mode_keys:
-        header.extend([f"{mode_key}_err", f"{mode_key}_xfoil_calls"])
-    header.append("static_xfoil_calls")
+        header.extend(
+            [
+                f"{mode_key}_err",
+                f"{mode_key}_scoring_aero_calls",
+                f"{mode_key}_optimization_aero_calls",
+                f"{mode_key}_function_evals",
+                f"{mode_key}_gradient_evals",
+            ]
+        )
 
     with open(global_summary_path, "w", encoding="utf-8") as f:
         f.write(",".join(header) + "\n")
@@ -400,11 +550,17 @@ def write_global_summary(base_workdir, results):
                 str(r["seed"]),
                 f"{r['err_init']:.6e}",
                 f"{r['static_err']:.6e}",
+                str(r.get("static_scoring_aero_calls", "")),
+                str(r.get("static_optimization_aero_calls", "")),
+                str(r.get("static_function_evals", "")),
+                str(r.get("static_gradient_evals", "")),
             ]
             for mode_key in mode_keys:
                 row.append(f"{r.get(f'{mode_key}_err', float('nan')):.6e}")
-                row.append(str(r.get(f"{mode_key}_xfoil_calls", "")))
-            row.append(str(r["static_xfoil_calls"]))
+                row.append(str(r.get(f"{mode_key}_scoring_aero_calls", "")))
+                row.append(str(r.get(f"{mode_key}_optimization_aero_calls", "")))
+                row.append(str(r.get(f"{mode_key}_function_evals", "")))
+                row.append(str(r.get(f"{mode_key}_gradient_evals", "")))
             f.write(",".join(row) + "\n")
 
         f.write("\nGLOBAL_STATS\n")

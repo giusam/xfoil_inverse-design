@@ -384,6 +384,7 @@ def _prepare_pred_level_context(
         working_dir=Path(workdir) / "pred_level_base",
         current_best_error=current_best_error,
     )
+    objective_old.set_eval_phase("score")
 
     bmin, bmax = SETTINGS["optimization"]["bounds"]
     bounds_old = [(bmin, bmax)] * len(a_opt)
@@ -452,6 +453,7 @@ def _prepare_pred_level_context(
         "Z_k": Z_old.copy(),
         "H_k": H_old.copy(),
         "pred_target_peak_normal": pred_target_peak_normal,
+        "n_scoring_aero_calls": int(objective_old.aero_call_counter_by_phase.get("score", 0)),
     }
 
 

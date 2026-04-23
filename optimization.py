@@ -167,6 +167,7 @@ def optimize_for_centers(
         xfoil_iter=SETTINGS["xfoil"]["xfoil_iter"],
         timeout=SETTINGS["xfoil"]["timeout"],
         working_dir=Path(workdir) / f"{label}_constraints",
+        record_aero_call=objective.record_aero_call,
     )
 
     bmin, bmax = SETTINGS["optimization"]["bounds"]
@@ -214,7 +215,12 @@ def optimize_for_centers(
         print(f">>> max|g|  = {grad_max:.6e}")
 
     print(f"\n===== OBJECTIVE CHECK AT a0 ({label}) =====")
-    j0 = objective(a0)
+    prev_phase = objective.current_phase
+    objective.set_eval_phase("setup")
+    try:
+        j0 = objective(a0)
+    finally:
+        objective.set_eval_phase(prev_phase)
     print(f"Initial objective value at a0 = {j0:.6e}")
     print(f"Failure penalty value         = {objective.get_penalty():.6e}")
     print(f"SLSQP constraints             = {len(all_constraints)}")
@@ -228,17 +234,58 @@ def optimize_for_centers(
     if deriv_mode == "cs":
         if not hasattr(objective, "compute_gradient_cs"):
             raise RuntimeError("Objective does not expose compute_gradient_cs().")
-        jac_fun = lambda a_vec: objective.compute_gradient_cs(np.asarray(a_vec, dtype=float))
+        jac_fun_raw = lambda a_vec: objective.compute_gradient_cs(np.asarray(a_vec, dtype=float))
     else:
-        jac_fun = jac_explicit
+        jac_fun_raw = jac_explicit
+
+    def _with_eval_phase(phase, func):
+        def wrapped(a_vec):
+            prev_phase = objective.current_phase
+            objective.set_eval_phase(phase)
+            try:
+                return func(a_vec)
+            finally:
+                objective.set_eval_phase(prev_phase)
+
+        return wrapped
+
+    all_constraints_wrapped = []
+    for constraint in all_constraints:
+        item = dict(constraint)
+        item["fun"] = _with_eval_phase("function", item["fun"])
+        if "jac" in item:
+            item["jac"] = _with_eval_phase("gradient", item["jac"])
+        all_constraints_wrapped.append(item)
+
+    def objective_for_optimizer(a_vec):
+        prev_phase = objective.current_phase
+        objective.set_eval_phase("function")
+        objective.n_function_evals += 1
+        try:
+            value = objective(np.asarray(a_vec, dtype=float))
+            objective.record_function_eval(a_vec)
+            return value
+        finally:
+            objective.set_eval_phase(prev_phase)
+
+    def jacobian_for_optimizer(a_vec):
+        prev_phase = objective.current_phase
+        objective.set_eval_phase("gradient")
+        objective.n_gradient_evals += 1
+        try:
+            g_vec = jac_fun_raw(np.asarray(a_vec, dtype=float))
+            objective.record_gradient_eval(a_vec)
+            return g_vec
+        finally:
+            objective.set_eval_phase(prev_phase)
 
     result = minimize(
-        objective,
+        objective_for_optimizer,
         a0,
         method="SLSQP",
-        jac=jac_fun,
+        jac=jacobian_for_optimizer,
         bounds=bounds,
-        constraints=all_constraints,
+        constraints=all_constraints_wrapped,
         options={
             "maxiter": SETTINGS["optimization"]["maxiter"],
             "ftol": SETTINGS["optimization"]["ftol"],
@@ -275,6 +322,7 @@ def optimize_for_centers(
     opt_dat = Path(workdir) / f"{label}_optimized_airfoil.dat"
     write_dat(opt_dat, x, yu_opt, yl_opt, name=f"{label.upper()}_OPTIMIZED")
 
+    n_postprocess_aero_calls = 1
     opt_res = run_aero(
         airfoil_dat=opt_dat,
         alpha_deg=SETTINGS["xfoil"]["alpha"],
@@ -297,7 +345,13 @@ def optimize_for_centers(
     err_opt = total_cp_error(cp_target, cp_opt)
 
     n_objective_evals = objective.eval_counter["k"]
-    n_xfoil_calls_total = n_objective_evals + 1
+    n_optimization_function_aero_calls = int(objective.aero_call_counter_by_phase.get("function", 0))
+    n_optimization_gradient_aero_calls = int(objective.aero_call_counter_by_phase.get("gradient", 0))
+    n_optimization_aero_calls_total = (
+        n_optimization_function_aero_calls + n_optimization_gradient_aero_calls
+    )
+    n_setup_aero_calls = int(objective.aero_call_counter_by_phase.get("setup", 0))
+    n_xfoil_calls_total = int(objective.aero_call_counter_total + n_postprocess_aero_calls)
 
     if SETTINGS.get("aero", {}).get("backend", "xfoil").strip().lower() == "cmplxfoil":
         clear_cmplxfoil_solver_cache()
@@ -314,7 +368,18 @@ def optimize_for_centers(
         "result": result,
         "n_objective_evals": n_objective_evals,
         "n_xfoil_calls_total": n_xfoil_calls_total,
+        "n_aero_calls_total_all_phases": n_xfoil_calls_total,
+        "n_setup_aero_calls": n_setup_aero_calls,
+        "n_postprocess_aero_calls": n_postprocess_aero_calls,
+        "n_optimization_aero_calls_total": n_optimization_aero_calls_total,
+        "n_optimization_function_aero_calls": n_optimization_function_aero_calls,
+        "n_optimization_gradient_aero_calls": n_optimization_gradient_aero_calls,
+        "n_function_evals": int(objective.n_function_evals),
+        "n_gradient_evals": int(objective.n_gradient_evals),
         "objective_history": list(objective.eval_history),
+        "function_eval_history": [dict(item) for item in objective.function_eval_history],
+        "gradient_eval_history": [dict(item) for item in objective.gradient_eval_history],
+        "aero_call_counter_by_phase": dict(objective.aero_call_counter_by_phase),
         "ndv_total": len(upper_centers) + len(lower_centers),
         "penalty_value": objective.get_penalty(),
         "n_slsqp_constraints": len(all_constraints),

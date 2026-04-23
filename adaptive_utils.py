@@ -3,13 +3,53 @@ import numpy as np
 from settings import SETTINGS
 
 
+_VALID_INTERVAL_SAMPLING_MODES = {"midpoint", "best_of_3"}
+
+
 def build_hh_centers(n_hh):
     xmin = SETTINGS["optimization"]["adaptive"]["xmin"]
     xmax = SETTINGS["optimization"]["adaptive"]["xmax"]
     return np.linspace(xmin, xmax, n_hh)
 
 
-def get_midpoint_candidates(centers):
+def get_interval_sampling_spec():
+    opt_ad = SETTINGS["optimization"]["adaptive"]
+    mode = str(opt_ad.get("interval_sampling_mode", "midpoint")).strip().lower()
+
+    if mode not in _VALID_INTERVAL_SAMPLING_MODES:
+        allowed = ", ".join(sorted(_VALID_INTERVAL_SAMPLING_MODES))
+        raise ValueError(
+            f"Invalid optimization.adaptive.interval_sampling_mode={mode!r}. "
+            f"Allowed values: {allowed}."
+        )
+
+    if mode == "midpoint":
+        return mode, (0.5,)
+
+    raw_fractions = opt_ad.get("interval_sampling_fractions", [0.25, 0.5, 0.75])
+    if not isinstance(raw_fractions, (list, tuple, np.ndarray)):
+        raise ValueError(
+            "optimization.adaptive.interval_sampling_fractions must be a list-like "
+            "with exactly 3 values in (0, 1)."
+        )
+
+    fractions = tuple(float(frac) for frac in raw_fractions)
+    if len(fractions) != 3:
+        raise ValueError(
+            "optimization.adaptive.interval_sampling_fractions must contain exactly 3 values "
+            "when interval_sampling_mode='best_of_3'."
+        )
+
+    for frac in fractions:
+        if not 0.0 < frac < 1.0:
+            raise ValueError(
+                "optimization.adaptive.interval_sampling_fractions values must lie strictly in (0, 1)."
+            )
+
+    return mode, fractions
+
+
+def build_candidate_intervals(centers, side=None):
     xmin = SETTINGS["optimization"]["adaptive"]["xmin"]
     xmax = SETTINGS["optimization"]["adaptive"]["xmax"]
 
@@ -19,19 +59,63 @@ def get_midpoint_candidates(centers):
         return []
 
     extended = np.concatenate(([xmin], centers, [xmax]))
-    mids = 0.5 * (extended[:-1] + extended[1:])
+    side_name = None if side is None else str(side).upper()
+    intervals = []
+    for i, (x_left, x_right) in enumerate(zip(extended[:-1], extended[1:])):
+        interval = {
+            "interval_id": i,
+            "x_left": float(x_left),
+            "x_right": float(x_right),
+        }
+        if side_name is not None:
+            interval["side"] = side_name
+            interval["interval_label"] = f"{side_name}_{i:02d}"
+        else:
+            interval["interval_label"] = f"INTERVAL_{i:02d}"
+        intervals.append(interval)
+
+    return intervals
+
+
+def build_interval_candidates(centers, side=None, sampling_mode=None, sampling_fractions=None):
+    centers = np.asarray(sorted(centers), dtype=float)
+    intervals = build_candidate_intervals(centers, side=side)
+
+    if sampling_mode is None or sampling_fractions is None:
+        sampling_mode, sampling_fractions = get_interval_sampling_spec()
 
     candidates = []
-    for i, c in enumerate(mids):
-        if np.min(np.abs(centers - c)) > 1.0e-12:
-            candidates.append(
+    for interval in intervals:
+        x_left = float(interval["x_left"])
+        x_right = float(interval["x_right"])
+        dx = x_right - x_left
+
+        for frac in sampling_fractions:
+            xc = x_left + float(frac) * dx
+            if len(centers) > 0 and np.min(np.abs(centers - xc)) <= 1.0e-12:
+                continue
+
+            candidate = dict(interval)
+            candidate.update(
                 {
-                    "x": float(c),
-                    "interval_id": i,
+                    "x": float(xc),
+                    "local_fraction": float(frac),
+                    "sampling_mode": str(sampling_mode),
                 }
             )
+            candidates.append(candidate)
 
     return candidates
+
+
+def get_midpoint_candidates(centers):
+    centers = np.asarray(sorted(centers), dtype=float)
+
+    return build_interval_candidates(
+        centers,
+        sampling_mode="midpoint",
+        sampling_fractions=(0.5,),
+    )
 
 
 def split_total_across_sides(n_total):

@@ -5,6 +5,11 @@ import numpy as np
 def _set_log_error_axis():
     plt.yscale("log")
 
+
+def _apply_log_grid(ax):
+    ax.grid(True, which="major", axis="both", alpha=0.25)
+    ax.grid(True, which="minor", axis="y", alpha=0.12)
+
 def plot_multiple_initial_geometries(x, yu_target, yl_target, initial_geometries, title="Initial geometries"):
     plt.figure(figsize=(10, 4))
 
@@ -306,44 +311,16 @@ def plot_error_mean_std(results, savepath=None):
         plt.show()
 
 
-def plot_error_vs_evals_with_refine(
-    initial_err,
-    static_calls,
-    static_err,
-    adaptive_history,
-    adaptive_evals,
-    savepath=None,
-):
-    plt.figure(figsize=(8, 4))
-
-    if static_calls is not None and static_err is not None and np.isfinite(static_err):
-        plt.plot(
-            [0, static_calls],
-            [initial_err, static_err],
-            "o-",
-            label="Static Cp error",
-        )
-
-    errs = [e for (_, e) in adaptive_history]
-    ndvs = [m for (m, _) in adaptive_history]
-
-    plt.plot(
-        [0] + adaptive_evals,
-        [initial_err] + errs,
-        "o-",
-        label="Adaptive Cp error",
-    )
-
-    for x, y, ndv in zip(adaptive_evals, errs, ndvs):
-        plt.axvline(x=x, linestyle="--", alpha=0.3)
-        plt.text(x, y, f"{ndv}", fontsize=8)
-
+def _finish_convergence_plot(xlabel, ylabel, title, savepath=None):
+    ax = plt.gca()
     _set_log_error_axis()
-    plt.xlabel("XFOIL calls")
-    plt.ylabel("Cp error")
-    plt.title("Cp error vs evaluations (with refine)")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
+    _apply_log_grid(ax)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    handles, labels = ax.get_legend_handles_labels()
+    if len(handles) > 0:
+        plt.legend()
     plt.tight_layout()
 
     if savepath is not None:
@@ -353,72 +330,205 @@ def plot_error_vs_evals_with_refine(
         plt.show()
 
 
-def plot_error_vs_evals_full(
-    initial_err,
-    static_history,
-    adaptive_history_full,
-    savepath=None,
-):
-    plt.figure(figsize=(9, 5))
+def _valid_error_value(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(value) or value <= 0.0:
+        return None
+    return value
 
-    static_x = [0]
-    static_y = [initial_err]
 
-    for item in static_history:
+def _plot_static_function_history(initial_err, function_eval_history, x_key, xlabel, title, savepath=None):
+    xs = [0]
+    ys = [float(initial_err)]
+
+    for item in function_eval_history:
         if item.get("status") != "OK":
             continue
-        yval = item.get("objective_base", item["objective"])
-        static_x.append(item["eval"])
-        static_y.append(yval)
+        yval = _valid_error_value(item.get("objective_base", item.get("objective")))
+        if yval is None:
+            continue
+        xs.append(int(item[x_key]))
+        ys.append(yval)
 
-    if len(static_x) > 1:
-        plt.plot(static_x, static_y, "-", lw=2, label="Static Cp error")
+    plt.figure(figsize=(9, 5))
+    plt.plot(xs, ys, "-", lw=2, label="STATIC")
+    _finish_convergence_plot(
+        xlabel=xlabel,
+        ylabel="Cp error",
+        title=title,
+        savepath=savepath,
+    )
 
-    adaptive_x = [0]
-    adaptive_y = [initial_err]
 
-    eval_offset_start = 0
+def _plot_static_gradient_history(initial_err, gradient_eval_history, x_key, xlabel, title, savepath=None):
+    xs = [0]
+    ys = [float(initial_err)]
+
+    for item in gradient_eval_history:
+        if item.get("status") != "OK":
+            continue
+        yval = _valid_error_value(item.get("objective_base_at_grad_point"))
+        if yval is None:
+            continue
+        xs.append(int(item[x_key]))
+        ys.append(yval)
+
+    plt.figure(figsize=(9, 5))
+    plt.plot(xs, ys, "-", lw=2, label="STATIC")
+    _finish_convergence_plot(
+        xlabel=xlabel,
+        ylabel="Cp error",
+        title=title,
+        savepath=savepath,
+    )
+
+
+def plot_error_vs_function_evals_static(initial_err, function_eval_history, savepath=None):
+    _plot_static_function_history(
+        initial_err=initial_err,
+        function_eval_history=function_eval_history,
+        x_key="cumulative_function_evals",
+        xlabel="Function evaluations",
+        title="Static Cp error vs function evaluations",
+        savepath=savepath,
+    )
+
+
+def plot_error_vs_gradient_evals_static(initial_err, gradient_eval_history, savepath=None):
+    _plot_static_gradient_history(
+        initial_err=initial_err,
+        gradient_eval_history=gradient_eval_history,
+        x_key="cumulative_gradient_evals",
+        xlabel="Gradient evaluations",
+        title="Static Cp error vs gradient evaluations",
+        savepath=savepath,
+    )
+
+
+def _plot_adaptive_history_full_opt(
+    initial_err,
+    history_full_opt,
+    history_key,
+    y_key,
+    local_x_key,
+    offset_end_key,
+    xlabel,
+    title,
+    label,
+    savepath=None,
+):
+    xs = [0]
+    ys = [float(initial_err)]
+    offset_start = 0
     refine_positions = []
     refine_labels = []
 
-    for level in adaptive_history_full:
-        level_hist = level["objective_history"]
-        ndv = level["ndv_total"]
-
-        for item in level_hist:
+    for level in history_full_opt:
+        for item in level.get(history_key, []):
             if item.get("status") != "OK":
                 continue
-            global_eval = eval_offset_start + item["eval"]
-            yval = item.get("objective_base", item["objective"])
-            adaptive_x.append(global_eval)
-            adaptive_y.append(yval)
+            yval = _valid_error_value(item.get(y_key))
+            if yval is None:
+                continue
+            xs.append(int(offset_start + item[local_x_key]))
+            ys.append(yval)
 
-        if len(level_hist) > 0:
-            level_end = eval_offset_start + level_hist[-1]["eval"]
-            refine_positions.append(level_end)
-            refine_labels.append(ndv)
-            eval_offset_start = level["eval_offset_end"]
+        level_end = int(level.get(offset_end_key, offset_start))
+        refine_positions.append(level_end)
+        refine_labels.append(level.get("ndv_total"))
+        offset_start = level_end
 
-    plt.plot(adaptive_x, adaptive_y, "-", lw=2, label="Adaptive Cp error")
+    plt.figure(figsize=(9, 5))
+    plt.plot(xs, ys, "-", lw=2, label=label)
 
-    for x, ndv in zip(refine_positions, refine_labels):
-        plt.axvline(x=x, linestyle="--", alpha=0.3)
-        y_text = min(adaptive_y) if len(adaptive_y) > 0 else initial_err
-        plt.text(x, y_text, f"{ndv}", fontsize=8, rotation=90, va="bottom")
+    ax = plt.gca()
+    for idx, (x_refine, ndv) in enumerate(zip(refine_positions, refine_labels)):
+        plt.axvline(x=x_refine, color="gray", alpha=0.3, linestyle=":")
+        label_text = f"ndv={ndv}" if idx == 0 else f"{ndv}"
+        ax.text(
+            x_refine,
+            0.985,
+            label_text,
+            transform=ax.get_xaxis_transform(),
+            fontsize=8,
+            rotation=0,
+            ha="center",
+            va="top",
+        )
 
-    ymin = min(adaptive_y + static_y)
-    plt.yscale("log")
-    plt.ylim(bottom=max(1e-8, ymin * 0.5))
+    _finish_convergence_plot(
+        xlabel=xlabel,
+        ylabel="Cp error",
+        title=title,
+        savepath=savepath,
+    )
 
-    plt.xlabel("Objective evaluations / XFOIL calls")
-    plt.ylabel("Cp error")
-    plt.title("Cp error history vs evaluations")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
 
-    if savepath is not None:
-        plt.savefig(savepath, dpi=200, bbox_inches="tight")
-        plt.close()
-    else:
-        plt.show()
+def plot_error_vs_function_evals_adaptive(initial_err, history_full_opt, savepath=None, label="Adaptive Cp error"):
+    _plot_adaptive_history_full_opt(
+        initial_err=initial_err,
+        history_full_opt=history_full_opt,
+        history_key="function_eval_history",
+        y_key="objective_base",
+        local_x_key="cumulative_function_evals",
+        offset_end_key="function_eval_offset_end",
+        xlabel="Function evaluations",
+        title="Adaptive Cp error vs function evaluations",
+        label=label,
+        savepath=savepath,
+    )
+
+
+def plot_error_vs_gradient_evals_adaptive(initial_err, history_full_opt, savepath=None, label="Adaptive Cp error"):
+    _plot_adaptive_history_full_opt(
+        initial_err=initial_err,
+        history_full_opt=history_full_opt,
+        history_key="gradient_eval_history",
+        y_key="objective_base_at_grad_point",
+        local_x_key="cumulative_gradient_evals",
+        offset_end_key="gradient_eval_offset_end",
+        xlabel="Gradient evaluations",
+        title="Adaptive Cp error vs gradient evaluations",
+        label=label,
+        savepath=savepath,
+    )
+
+
+def plot_error_vs_function_evals_compare(series_list, savepath=None):
+    plt.figure(figsize=(9, 5))
+
+    for series in series_list:
+        x = list(series.get("x", []))
+        y = list(series.get("y", []))
+        if len(x) == 0 or len(y) == 0:
+            continue
+        plt.plot(x, y, "-", lw=2, label=series.get("label", ""))
+
+    _finish_convergence_plot(
+        xlabel="Function evaluations",
+        ylabel="Cp error",
+        title="Cp error vs function evaluations",
+        savepath=savepath,
+    )
+
+
+
+def plot_error_vs_gradient_evals_compare(series_list, savepath=None):
+    plt.figure(figsize=(9, 5))
+
+    for series in series_list:
+        x = list(series.get("x", []))
+        y = list(series.get("y", []))
+        if len(x) == 0 or len(y) == 0:
+            continue
+        plt.plot(x, y, "-", lw=2, label=series.get("label", ""))
+
+    _finish_convergence_plot(
+        xlabel="Gradient evaluations",
+        ylabel="Cp error",
+        title="Cp error vs gradient evaluations",
+        savepath=savepath,
+    )

@@ -19,6 +19,25 @@ from adaptive_constraints import (
 )
 from adaptive_pred import _score_candidate_pred
 
+
+def _format_candidate_context(candidate):
+    parts = []
+
+    interval_label = candidate.get("interval_label")
+    if interval_label is None and "interval_id" in candidate:
+        interval_label = candidate["interval_id"]
+    if interval_label is not None:
+        parts.append(f"interval={interval_label}")
+
+    if "local_fraction" in candidate:
+        parts.append(f"fraction={float(candidate['local_fraction']):.2f}")
+
+    if len(parts) == 0:
+        return ""
+
+    return "  " + "  ".join(parts)
+
+
 def _score_candidate_grad(
     objective,
     a_base,
@@ -193,8 +212,10 @@ def score_candidate(
         side=side,
         xc=xc,
     )
+    objective.set_eval_phase("score")
 
     indicator = str(indicator).upper()
+    candidate_context = _format_candidate_context(candidate)
 
     bmin, bmax = SETTINGS["optimization"]["bounds"]
     bounds = [(bmin, bmax)] * len(a_base)
@@ -237,15 +258,17 @@ def score_candidate(
             f"{e['name']}@{e['x']:.3f}" if e["name"] == "thickness_stations" else e["name"]
             for e in out["active_entries"]
         ]
+        n_scoring_aero_calls = int(objective.aero_call_counter_by_phase.get("score", 0))
 
         msg = (
-            f"SCORE[{indicator}] side={side} candidate={xc:.6f}  "
+            f"SCORE[{indicator}] side={side} candidate={xc:.6f}{candidate_context}  "
             f"mode={out['mode']}  "
             f"r_norm={out['score']:.6e}  "
             f"r_new={out['component']:.6e}  "
             f"gnew={out['grad_j'][new_idx]:.6e}  "
             f"n_active={len(out['active_entries'])}  "
-            f"evals={objective.eval_counter['k']}"
+            f"score_aero_calls={n_scoring_aero_calls}  "
+            f"debug_evals={objective.eval_counter['k']}"
         )
         print(msg)
 
@@ -261,7 +284,7 @@ def score_candidate(
             "raw_grad": float(out["grad_j"][new_idx]),
             "active_names": active_names,
             "lambda": out["lam"].copy(),
-            "n_evals": objective.eval_counter["k"],
+            "n_scoring_aero_calls": n_scoring_aero_calls,
             "indicator": indicator,
             "mode": out["mode"],
         }
@@ -285,15 +308,17 @@ def score_candidate(
             f"{e['name']}@{e['x']:.3f}" if e["name"] == "thickness_stations" else e["name"]
             for e in out["active_entries"]
         ]
+        n_scoring_aero_calls = int(objective.aero_call_counter_by_phase.get("score", 0))
 
         print(
-            f"SCORE[{indicator}] side={side} candidate={xc:.6f}  "
+            f"SCORE[{indicator}] side={side} candidate={xc:.6f}{candidate_context}  "
             f"delta_pred={out['score']:.6e}  "
             f"d_new={out['component']:.6e}  "
             f"gnew={out['raw_grad']:.6e}  "
             f"tau={out.get('tau', 1.0):.6e}  "
             f"n_active={len(out['active_entries'])}  "
-            f"evals={objective.eval_counter['k']}  "
+            f"score_aero_calls={n_scoring_aero_calls}  "
+            f"debug_evals={objective.eval_counter['k']}  "
             f"mode={out['mode']}"
         )
 
@@ -305,7 +330,7 @@ def score_candidate(
             "raw_grad": out["raw_grad"],
             "active_names": active_names,
             "lambda": np.zeros(0),
-            "n_evals": objective.eval_counter["k"],
+            "n_scoring_aero_calls": n_scoring_aero_calls,
             "indicator": indicator,
             "mode": out["mode"],
             "tau": out.get("tau", 1.0),
@@ -323,12 +348,13 @@ def score_candidate(
     )
 
     print(
-        f"SCORE[{indicator}] side={side} candidate={xc:.6f}  "
+        f"SCORE[{indicator}] side={side} candidate={xc:.6f}{candidate_context}  "
         f"g_norm={out['score']:.6e}  "
         f"g_new={out['component']:.6e}  "
         f"mode={out['mode']}  "
         f"n_fail_dirs={out['fd_diag']['n_fail_dirs']}  "
-        f"evals={objective.eval_counter['k']}"
+        f"score_aero_calls={int(objective.aero_call_counter_by_phase.get('score', 0))}  "
+        f"debug_evals={objective.eval_counter['k']}"
     )
 
     return {
@@ -339,7 +365,7 @@ def score_candidate(
         "raw_grad": out["raw_grad"],
         "active_names": [],
         "lambda": np.zeros(0),
-        "n_evals": objective.eval_counter["k"],
+        "n_scoring_aero_calls": int(objective.aero_call_counter_by_phase.get("score", 0)),
         "indicator": indicator,
         "mode": out["mode"],
     }

@@ -69,6 +69,10 @@ def make_objective(
 ):
     eval_counter = {"k": 0}
     eval_history = []
+    function_eval_history = []
+    gradient_eval_history = []
+    current_phase = {"name": "function"}
+    real_objective_cache = {}
     working_dir = Path(working_dir)
     working_dir.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +100,86 @@ def make_objective(
     if not grad_history_path.exists():
         with open(grad_history_path, "w", encoding="utf-8") as f:
             f.write("# eval grad[0] grad[1] ...\n")
+
+    def _cache_key(a_vec):
+        return tuple(np.round(np.real(np.asarray(a_vec)), 12))
+
+    def _optimization_aero_calls():
+        by_phase = objective.aero_call_counter_by_phase
+        return int(by_phase.get("function", 0) + by_phase.get("gradient", 0))
+
+    def set_eval_phase(phase):
+        current_phase["name"] = str(phase)
+        objective.current_phase = current_phase["name"]
+
+    def _record_aero_call():
+        phase = current_phase["name"]
+        objective.aero_call_counter_total += 1
+        objective.aero_call_counter_by_phase[phase] = (
+            objective.aero_call_counter_by_phase.get(phase, 0) + 1
+        )
+
+    def _store_real_objective_cache(a_vec, objective_value, status, objective_base=None):
+        if objective_base is None:
+            objective_base = objective_value
+
+        real_objective_cache[_cache_key(a_vec)] = {
+            "objective": float(np.real(objective_value)),
+            "objective_base": float(np.real(objective_base)),
+            "status": status,
+        }
+
+    def get_cached_real_objective(a_vec):
+        item = real_objective_cache.get(_cache_key(a_vec))
+        if item is None:
+            return None
+        return dict(item)
+
+    def record_function_eval(a_vec):
+        cached = get_cached_real_objective(a_vec)
+        if cached is None:
+            objective_value = float("nan")
+            objective_base = float("nan")
+            status = "NO_REAL_CACHE"
+        else:
+            objective_value = cached["objective"]
+            objective_base = cached["objective_base"]
+            status = cached["status"]
+
+        function_eval_history.append(
+            {
+                "function_eval_id": int(objective.n_function_evals),
+                "objective": objective_value,
+                "objective_base": objective_base,
+                "status": status,
+                "cumulative_optimization_aero_calls": _optimization_aero_calls(),
+                "cumulative_function_evals": int(objective.n_function_evals),
+                "cumulative_gradient_evals": int(objective.n_gradient_evals),
+            }
+        )
+
+    def record_gradient_eval(a_vec):
+        cached = get_cached_real_objective(a_vec)
+        if cached is None:
+            objective_value = float("nan")
+            objective_base = float("nan")
+            status = "NO_REAL_CACHE"
+        else:
+            objective_value = cached["objective"]
+            objective_base = cached["objective_base"]
+            status = cached["status"]
+
+        gradient_eval_history.append(
+            {
+                "gradient_eval_id": int(objective.n_gradient_evals),
+                "objective": objective_value,
+                "objective_base_at_grad_point": objective_base,
+                "status": status,
+                "cumulative_optimization_aero_calls": _optimization_aero_calls(),
+                "cumulative_function_evals": int(objective.n_function_evals),
+                "cumulative_gradient_evals": int(objective.n_gradient_evals),
+            }
+        )
 
     def get_penalty():
         scale = max(float(current_best_error), penalty_floor)
@@ -176,6 +260,7 @@ def make_objective(
                     "status": "FAIL_THICKNESS",
                 }
             )
+            _store_real_objective_cache(a, penalty_value, "FAIL_THICKNESS")
             return penalty_value
 
         if aero_backend == "cmplxfoil":
@@ -190,6 +275,7 @@ def make_objective(
 
             run_dir = working_dir / "cmplxfoil_objective_run"
 
+            _record_aero_call()
             res = run_cmplxfoil_coords(
                 airfoil_dat=cmplxfoil_template_dat,
                 x=x,
@@ -208,6 +294,7 @@ def make_objective(
 
             run_dir = working_dir / f"candidate_run_{k:05d}"
 
+            _record_aero_call()
             res = run_aero(
                 airfoil_dat=airfoil_dat,
                 alpha_deg=alpha_deg,
@@ -229,6 +316,7 @@ def make_objective(
                     "status": "FAIL_AERO",
                 }
             )
+            _store_real_objective_cache(a, penalty_value, "FAIL_AERO")
             return penalty_value
 
         cp_candidate = split_upper_lower_cp_from_x(
@@ -258,6 +346,7 @@ def make_objective(
             }
         )
 
+        _store_real_objective_cache(a, objective_total, "OK", objective_base=err)
         return objective_total
 
     def _evaluate_aero_state_cs(a, enabled_metric_names=None):
@@ -284,6 +373,7 @@ def make_objective(
 
         cs_run_dir = working_dir / "cmplxfoil_cs_run"
 
+        _record_aero_call()
         res = run_cmplxfoil_coords(
             airfoil_dat=cmplxfoil_template_dat,
             x=x,
@@ -415,6 +505,18 @@ def make_objective(
 
     objective.eval_counter = eval_counter
     objective.eval_history = eval_history
+    objective.aero_call_counter_total = 0
+    objective.aero_call_counter_by_phase = {}
+    objective.n_function_evals = 0
+    objective.n_gradient_evals = 0
+    objective.function_eval_history = function_eval_history
+    objective.gradient_eval_history = gradient_eval_history
+    objective.current_phase = current_phase["name"]
+    objective.set_eval_phase = set_eval_phase
+    objective.record_aero_call = _record_aero_call
+    objective.record_function_eval = record_function_eval
+    objective.record_gradient_eval = record_gradient_eval
+    objective.get_cached_real_objective = get_cached_real_objective
     objective.get_penalty = get_penalty
     objective.a_history_path = a_history_path
     objective.grad_history_path = grad_history_path

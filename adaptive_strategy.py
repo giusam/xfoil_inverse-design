@@ -6,7 +6,7 @@ from settings import SETTINGS
 from optimization import optimize_for_centers
 from adaptive_utils import (
     build_side_specific_initial_centers,
-    get_midpoint_candidates,
+    build_interval_candidates,
     lift_a_to_new_side_centers,
     _compute_adaptive_nadd,
 )
@@ -73,8 +73,13 @@ def _print_candidate_diagnostics(scored, topk=12):
     print("===== CANDIDATE RANKING (TOP) =====")
     for i, item in enumerate(scored[:topk], start=1):
         lam_str = np.array2string(item["lambda"], precision=3, suppress_small=False) if len(item["lambda"]) > 0 else "[]"
+        interval_label = str(item.get("interval_label", item.get("interval_id", "?")))
+        fraction = item.get("local_fraction")
+        fraction_str = f"{float(fraction):.2f}" if fraction is not None else "-"
         print(
             f"{i:02d} | side={item['side']:<5s} "
+            f"interval={interval_label:<10s} "
+            f"frac={fraction_str:<4s}  "
             f"x={item['x']:.6f}  "
             f"score={item['score']:.6e}  "
             f"component={item['component']:.6e}  "
@@ -112,6 +117,53 @@ def _print_candidate_diagnostics(scored, topk=12):
 
     if not found_pair:
         print("No same-x upper/lower pairs in current candidate set.")
+
+
+def _candidate_beats_interval_best(candidate, current_best):
+    if current_best is None:
+        return True
+
+    if candidate["score"] > current_best["score"]:
+        return True
+    if candidate["score"] < current_best["score"]:
+        return False
+
+    candidate_midpoint = abs(float(candidate.get("local_fraction", np.nan)) - 0.5) <= 1.0e-12
+    current_best_midpoint = abs(float(current_best.get("local_fraction", np.nan)) - 0.5) <= 1.0e-12
+    if candidate_midpoint and not current_best_midpoint:
+        return True
+    if current_best_midpoint and not candidate_midpoint:
+        return False
+
+    return False
+
+
+def reduce_to_best_candidate_per_interval(scored_candidates):
+    winners = {}
+    encounter_order = []
+
+    for item in scored_candidates:
+        interval_key = (item["side"], item["interval_id"])
+        if interval_key not in winners:
+            winners[interval_key] = item
+            encounter_order.append(interval_key)
+            continue
+
+        if _candidate_beats_interval_best(item, winners[interval_key]):
+            winners[interval_key] = item
+
+    return [winners[key] for key in encounter_order]
+
+
+def _format_selected_candidate_summary(indicator, candidate):
+    interval_label = candidate.get("interval_label", candidate.get("interval_id", "?"))
+    return (
+        f"[{str(indicator).upper()}] interval={interval_label} "
+        f"winner_fraction={float(candidate.get('local_fraction', 0.5)):.2f} "
+        f"center={float(candidate['x']):.6f} "
+        f"score={float(candidate['score']):.6e}"
+    )
+
 
 def _score_candidate_oracle(
     x,
@@ -168,12 +220,18 @@ def _score_candidate_oracle(
     )
 
     delta_real = float(current_best_error - out["err_opt"])
+    interval_label = candidate.get("interval_label", candidate.get("interval_id", "?"))
+    candidate_context = ""
+    if interval_label is not None:
+        candidate_context += f"  interval={interval_label}"
+    if "local_fraction" in candidate:
+        candidate_context += f"  fraction={float(candidate['local_fraction']):.2f}"
 
     print(
-        f"SCORE[ORACLE] side={side} candidate={xc:.6f}  "
+        f"SCORE[ORACLE] side={side} candidate={xc:.6f}{candidate_context}  "
         f"delta_real={delta_real:.6e}  "
         f"err_after={float(out['err_opt']):.6e}  "
-        f"evals={int(out['n_xfoil_calls_total'])}"
+        f"score_aero_calls={int(out['n_aero_calls_total_all_phases'])}"
     )
 
     return {
@@ -184,7 +242,7 @@ def _score_candidate_oracle(
         "raw_grad": np.nan,
         "active_names": [],
         "lambda": np.zeros(0),
-        "n_evals": int(out["n_xfoil_calls_total"]),
+        "n_scoring_aero_calls": int(out["n_aero_calls_total_all_phases"]),
         "indicator": "ORACLE",
         "mode": "ORACLE_REAL",
         "err_after": float(out["err_opt"]),
@@ -213,14 +271,20 @@ def run_adaptive_strategy(
 
     history_evals = []
     history_full = []
+    history_opt_aero_calls = []
+    history_function_evals = []
+    history_gradient_evals = []
+    history_full_opt = []
     upper_centers, lower_centers = build_side_specific_initial_centers(n0)
 
     a0 = np.zeros(len(upper_centers) + len(lower_centers))
     history = []
     center_history = []
-    n_scoring_evals_total = 0
-    n_optimization_evals_total = 0
-    n_xfoil_calls_total = 0
+    selection_history = []
+    n_scoring_aero_calls_total = 0
+    n_optimization_aero_calls_total = 0
+    n_function_evals_total = 0
+    n_gradient_evals_total = 0
     current_best_error = float(initial_error)
 
     adaptive_out = optimize_for_centers(
@@ -247,17 +311,31 @@ def run_adaptive_strategy(
 
     current_best_error = adaptive_out["err_opt"]
 
-    n_optimization_evals_total += adaptive_out["n_objective_evals"]
-    n_xfoil_calls_total += adaptive_out["n_xfoil_calls_total"]
+    n_optimization_aero_calls_total += adaptive_out["n_optimization_aero_calls_total"]
+    n_function_evals_total += adaptive_out["n_function_evals"]
+    n_gradient_evals_total += adaptive_out["n_gradient_evals"]
 
     history.append((adaptive_out["ndv_total"], adaptive_out["err_opt"]))
-    history_evals.append(n_xfoil_calls_total)
+    history_evals.append(n_optimization_aero_calls_total)
+    history_opt_aero_calls.append(n_optimization_aero_calls_total)
+    history_function_evals.append(n_function_evals_total)
+    history_gradient_evals.append(n_gradient_evals_total)
 
     history_full.append(
         {
             "ndv_total": adaptive_out["ndv_total"],
-            "eval_offset_end": n_xfoil_calls_total,
+            "eval_offset_end": n_optimization_aero_calls_total,
             "objective_history": [dict(item) for item in adaptive_out["objective_history"]],
+        }
+    )
+    history_full_opt.append(
+        {
+            "ndv_total": adaptive_out["ndv_total"],
+            "opt_aero_offset_end": n_optimization_aero_calls_total,
+            "function_eval_offset_end": n_function_evals_total,
+            "gradient_eval_offset_end": n_gradient_evals_total,
+            "function_eval_history": [dict(item) for item in adaptive_out["function_eval_history"]],
+            "gradient_eval_history": [dict(item) for item in adaptive_out["gradient_eval_history"]],
         }
     )
 
@@ -298,14 +376,8 @@ def run_adaptive_strategy(
     }
 
     while (len(upper_centers) + len(lower_centers)) < n_final:
-        cand_upper_raw = get_midpoint_candidates(upper_centers)
-        cand_lower_raw = get_midpoint_candidates(lower_centers)
-
-        candidates = []
-        for c in cand_upper_raw:
-            candidates.append({"side": "UPPER", "x": float(c["x"]), "interval_id": c["interval_id"]})
-        for c in cand_lower_raw:
-            candidates.append({"side": "LOWER", "x": float(c["x"]), "interval_id": c["interval_id"]})
+        candidates = list(build_interval_candidates(upper_centers, side="UPPER"))
+        candidates.extend(build_interval_candidates(lower_centers, side="LOWER"))
 
         if len(candidates) == 0:
             break
@@ -323,9 +395,10 @@ def run_adaptive_strategy(
                 current_best_error=current_best_error,
                 workdir=Path(workdir) / "adaptive_candidate_scoring",
             )
+            n_scoring_aero_calls_total += int(pred_context.get("n_scoring_aero_calls", 0))
 
         current_ndv = len(upper_centers) + len(lower_centers)
-        scored = []
+        scored_local = []
         for cand in candidates:
             if str(indicator).upper() == "ORACLE":
                 info = _score_candidate_oracle(
@@ -357,14 +430,17 @@ def run_adaptive_strategy(
                     pred_context=pred_context,
                 )
 
-            n_scoring_evals_total += info["n_evals"]
-            n_xfoil_calls_total += info["n_evals"]
+            n_scoring_aero_calls_total += int(info["n_scoring_aero_calls"])
 
-            scored.append(
+            scored_local.append(
                 {
                     "side": info["side"],
                     "x": info["x"],
                     "interval_id": cand["interval_id"],
+                    "interval_label": cand.get("interval_label", f"{cand['side']}_{cand['interval_id']:02d}"),
+                    "x_left": float(cand["x_left"]),
+                    "x_right": float(cand["x_right"]),
+                    "local_fraction": float(cand.get("local_fraction", 0.5)),
                     "score": info["score"],
                     "component": info["component"],
                     "raw_grad": info["raw_grad"],
@@ -374,6 +450,7 @@ def run_adaptive_strategy(
                 }
             )
 
+        scored = reduce_to_best_candidate_per_interval(scored_local)
         scored.sort(key=lambda item: (-item["score"], item["x"]))
         _print_candidate_diagnostics(scored, topk=12)
 
@@ -391,7 +468,9 @@ def run_adaptive_strategy(
         print(f"current ndv       = {current_ndv}")
         print(f"growth ratio      = {SETTINGS['optimization']['adaptive']['growth_ratio']:.6f}")
         print(f"current best err  = {current_best_error:.6e}")
-        print(f"chosen candidates = {chosen}")
+        print("chosen candidates =")
+        for cand in chosen:
+            print(f"  {_format_selected_candidate_summary(indicator, cand)}")
 
         new_upper = sorted(list(upper_centers))
         new_lower = sorted(list(lower_centers))
@@ -404,6 +483,26 @@ def run_adaptive_strategy(
 
         new_upper = sorted(set(new_upper))
         new_lower = sorted(set(new_lower))
+
+        selection_history.append(
+            {
+                "ndv_before": current_ndv,
+                "indicator": str(indicator).upper(),
+                "selected_candidates": [
+                    {
+                        "side": cand["side"],
+                        "interval_id": int(cand["interval_id"]),
+                        "interval_label": str(cand.get("interval_label", cand["interval_id"])),
+                        "x_left": float(cand["x_left"]),
+                        "x_right": float(cand["x_right"]),
+                        "local_fraction": float(cand.get("local_fraction", 0.5)),
+                        "center": float(cand["x"]),
+                        "score": float(cand["score"]),
+                    }
+                    for cand in chosen
+                ],
+            }
+        )
 
         new_a0 = lift_a_to_new_side_centers(
             old_upper=upper_centers,
@@ -439,20 +538,34 @@ def run_adaptive_strategy(
 
         current_best_error = adaptive_out["err_opt"]
 
-        n_optimization_evals_total += adaptive_out["n_objective_evals"]
-        n_xfoil_calls_total += adaptive_out["n_xfoil_calls_total"]
+        n_optimization_aero_calls_total += adaptive_out["n_optimization_aero_calls_total"]
+        n_function_evals_total += adaptive_out["n_function_evals"]
+        n_gradient_evals_total += adaptive_out["n_gradient_evals"]
 
         upper_centers = new_upper
         lower_centers = new_lower
 
         history.append((adaptive_out["ndv_total"], adaptive_out["err_opt"]))
-        history_evals.append(n_xfoil_calls_total)
+        history_evals.append(n_optimization_aero_calls_total)
+        history_opt_aero_calls.append(n_optimization_aero_calls_total)
+        history_function_evals.append(n_function_evals_total)
+        history_gradient_evals.append(n_gradient_evals_total)
 
         history_full.append(
             {
                 "ndv_total": adaptive_out["ndv_total"],
-                "eval_offset_end": n_xfoil_calls_total,
+                "eval_offset_end": n_optimization_aero_calls_total,
                 "objective_history": [dict(item) for item in adaptive_out["objective_history"]],
+            }
+        )
+        history_full_opt.append(
+            {
+                "ndv_total": adaptive_out["ndv_total"],
+                "opt_aero_offset_end": n_optimization_aero_calls_total,
+                "function_eval_offset_end": n_function_evals_total,
+                "gradient_eval_offset_end": n_gradient_evals_total,
+                "function_eval_history": [dict(item) for item in adaptive_out["function_eval_history"]],
+                "gradient_eval_history": [dict(item) for item in adaptive_out["gradient_eval_history"]],
             }
         )
 
@@ -496,10 +609,19 @@ def run_adaptive_strategy(
     adaptive_out["history"] = history
     adaptive_out["history_evals"] = history_evals
     adaptive_out["history_full"] = history_full
+    adaptive_out["history_opt_aero_calls"] = history_opt_aero_calls
+    adaptive_out["history_function_evals"] = history_function_evals
+    adaptive_out["history_gradient_evals"] = history_gradient_evals
+    adaptive_out["history_full_opt"] = history_full_opt
     adaptive_out["center_history"] = center_history
-    adaptive_out["n_scoring_evals_total"] = n_scoring_evals_total
-    adaptive_out["n_optimization_evals_total"] = n_optimization_evals_total
-    adaptive_out["n_total_evals"] = n_xfoil_calls_total
+    adaptive_out["selection_history"] = selection_history
+    adaptive_out["n_scoring_aero_calls_total"] = n_scoring_aero_calls_total
+    adaptive_out["n_optimization_aero_calls_total"] = n_optimization_aero_calls_total
+    adaptive_out["n_function_evals_total"] = n_function_evals_total
+    adaptive_out["n_gradient_evals_total"] = n_gradient_evals_total
+    adaptive_out["n_scoring_evals_total"] = n_scoring_aero_calls_total
+    adaptive_out["n_optimization_evals_total"] = n_optimization_aero_calls_total
+    adaptive_out["n_total_evals"] = n_scoring_aero_calls_total + n_optimization_aero_calls_total
     adaptive_out["best_err_opt"] = best_adaptive["err_opt"]
     adaptive_out["best_ndv_total"] = best_adaptive["ndv_total"]
     adaptive_out["best_a_opt"] = best_adaptive["a_opt"]
