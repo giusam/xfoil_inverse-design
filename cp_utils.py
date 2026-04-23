@@ -3,7 +3,7 @@ import numpy as np
 
 def split_upper_lower_cp_from_x(x_cp, cp):
     x_cp = np.asarray(x_cp, dtype=float)
-    cp = np.asarray(cp, dtype=float)
+    cp = np.asarray(cp)
 
     i_le = np.argmin(x_cp)
 

@@ -127,8 +127,8 @@ def apply_hicks_henne_deformation(
     yu_base = np.asarray(yu_base, dtype=float)
     yl_base = np.asarray(yl_base, dtype=float)
 
-    a_upper = np.asarray(a_upper, dtype=float)
-    a_lower = np.asarray(a_lower, dtype=float)
+    a_upper = np.asarray(a_upper)
+    a_lower = np.asarray(a_lower)
 
     upper_centers = np.asarray(upper_centers, dtype=float)
     lower_centers = np.asarray(lower_centers, dtype=float)

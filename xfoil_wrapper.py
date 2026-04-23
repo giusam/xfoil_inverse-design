@@ -123,6 +123,7 @@ def run_xfoil(
         f"LOAD {local_airfoil.name}\n"
         "PANE\n"
         "OPER\n"
+        f"MACH {SETTINGS['xfoil']['mach']}\n"
         f"VISC {reynolds}\n"
         "VPAR\n"
         f"XTR {xtr_upper} {xtr_lower}\n"

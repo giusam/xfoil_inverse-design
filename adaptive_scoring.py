@@ -29,15 +29,26 @@ def _score_candidate_grad(
     step_vector,
     base_item,
 ):
-    grad_j, fd_diag = _compute_full_objective_gradient(
-        objective=objective,
-        a_base=a_base,
-        bounds=bounds,
-        rel_step=rel_step,
-        abs_step_floor=abs_step_floor,
-        step_vector=step_vector,
-        base_item=base_item,
-    )
+    deriv_mode = SETTINGS.get("aero", {}).get("derivatives", "fd").strip().lower()
+
+    if deriv_mode == "cs" and hasattr(objective, "compute_gradient_cs"):
+        grad_j = objective.compute_gradient_cs(np.asarray(a_base, dtype=float))
+        fd_diag = {
+            "n_fail_dirs": 0,
+            "fail_indices": [],
+            "ndv": len(grad_j),
+            "mode": "CS",
+        }
+    else:
+        grad_j, fd_diag = _compute_full_objective_gradient(
+            objective=objective,
+            a_base=a_base,
+            bounds=bounds,
+            rel_step=rel_step,
+            abs_step_floor=abs_step_floor,
+            step_vector=step_vector,
+            base_item=base_item,
+        )
 
     score = float(np.linalg.norm(grad_j))
     gnew = float(grad_j[new_idx])
@@ -47,7 +58,7 @@ def _score_candidate_grad(
         "raw_grad": gnew,
         "grad_j": grad_j,
         "fd_diag": fd_diag,
-        "mode": "GRAD",
+        "mode": "GRAD_CS" if deriv_mode == "cs" else "GRAD_FD",
     }
 
 
@@ -85,16 +96,26 @@ def _score_candidate_ikkt(
         if spec.get("enabled", False):
             enabled_aero.append(name)
 
-    grad_j, grad_metrics_aero, fd_diag = _compute_full_aero_gradients(
-        objective=objective,
-        a_base=a_base,
-        enabled_metric_names=enabled_aero,
-        bounds=bounds,
-        rel_step=rel_step,
-        abs_step_floor=abs_step_floor,
-        step_vector=step_vector,
-        base_item=base_item,
-    )
+    deriv_mode = SETTINGS.get("aero", {}).get("derivatives", "fd").strip().lower()
+
+    if deriv_mode == "cs" and hasattr(objective, "compute_aero_gradients_cs"):
+        grad_j, grad_metrics_aero, fd_diag = objective.compute_aero_gradients_cs(
+            np.asarray(a_base, dtype=float),
+            enabled_metric_names=enabled_aero,
+        )
+        ikkt_mode = "IKKT_CS"
+    else:
+        grad_j, grad_metrics_aero, fd_diag = _compute_full_aero_gradients(
+            objective=objective,
+            a_base=a_base,
+            enabled_metric_names=enabled_aero,
+            bounds=bounds,
+            rel_step=rel_step,
+            abs_step_floor=abs_step_floor,
+            step_vector=step_vector,
+            base_item=base_item,
+        )
+        ikkt_mode = "IKKT_FD"
 
     yu, yl = _rebuild_geometry_from_a(x, yu_init, yl_init, upper_centers, lower_centers, a_base)
     grad_geom_base = _compute_geometric_gradients_analytic(x, upper_centers, lower_centers)
@@ -120,7 +141,7 @@ def _score_candidate_ikkt(
             "lam": np.zeros(0),
             "r": grad_j.copy(),
             "grad_j": grad_j.copy(),
-            "mode": "NO_ACTIVE",
+            "mode": f"NO_ACTIVE_{'CS' if deriv_mode == 'cs' else 'FD'}",
             "fd_diag": fd_diag,
         }
 
@@ -134,7 +155,7 @@ def _score_candidate_ikkt(
         "lam": lam,
         "r": r,
         "grad_j": grad_j,
-        "mode": "IKKT",
+        "mode": ikkt_mode,
         "fd_diag": fd_diag,
     }
 
@@ -305,6 +326,7 @@ def score_candidate(
         f"SCORE[{indicator}] side={side} candidate={xc:.6f}  "
         f"g_norm={out['score']:.6e}  "
         f"g_new={out['component']:.6e}  "
+        f"mode={out['mode']}  "
         f"n_fail_dirs={out['fd_diag']['n_fail_dirs']}  "
         f"evals={objective.eval_counter['k']}"
     )
@@ -319,5 +341,5 @@ def score_candidate(
         "lambda": np.zeros(0),
         "n_evals": objective.eval_counter["k"],
         "indicator": indicator,
-        "mode": "GRAD",
+        "mode": out["mode"],
     }

@@ -24,8 +24,8 @@ def print_initial_state(seed, err_init, init_res, penalty_scale):
     print(f"Initial dynamic penalty scale = {penalty_scale:.6e}")
 
 
-def report_initial_xfoil_failure(summary_dir, seed, init_res):
-    print(f"\n[WARNING] Initial XFOIL run failed for seed={seed}. Seed skipped.")
+def report_initial_aero_failure(summary_dir, seed, init_res):
+    print(f"\n[WARNING] Initial aero run failed for seed={seed}. Seed skipped.")
     print("stdout:")
     print(init_res["stdout"])
     print("stderr:")
@@ -37,23 +37,19 @@ def report_initial_xfoil_failure(summary_dir, seed, init_res):
     with open(summary_dir / "summary.txt", "w", encoding="utf-8") as f:
         f.write("===== FINAL RECAP =====\n")
         f.write(f"seed = {seed}\n")
-        f.write("status = FAILED_AT_INITIAL_XFOIL\n")
+        f.write("status = FAILED_AT_INITIAL_AERO\n")
         f.write("stdout:\n")
         f.write(str(init_res["stdout"]) + "\n")
         f.write("stderr:\n")
         f.write(str(init_res["stderr"]) + "\n")
 
 
-def _extract_last_ok_objective_parts(out_dict):
+def _extract_last_ok_j(out_dict):
     hist = out_dict.get("objective_history", [])
     for item in reversed(hist):
         if item.get("status") == "OK":
-            return (
-                item.get("objective_base", float("nan")),
-                item.get("constraint_penalty", 0.0),
-                item.get("objective", float("nan")),
-            )
-    return float("nan"), float("nan"), float("nan")
+            return item.get("objective_base", float("nan"))
+    return float("nan")
 
 
 def _fmt_or_skipped(value, skipped):
@@ -63,10 +59,55 @@ def _fmt_or_skipped(value, skipped):
 def _mode_title(mode_key):
     return mode_key.upper()
 
+def _write_cp_from_res(res, dst_path):
+    if res is None or res.get("cp_data") is None:
+        return
+
+    cp_x = np.asarray(res["cp_data"]["x"], dtype=float)
+    cp_v = np.real(np.asarray(res["cp_data"]["cp"]))
+
+    data = np.column_stack([cp_x, cp_v])
+    np.savetxt(dst_path, data, header="x cp", comments="")
+
+
+def _write_polar_from_res(res, dst_path):
+    if res is None or res.get("polar") is None:
+        return
+
+    polar = res["polar"]
+    alpha = float(np.real(polar["alpha"]))
+    cl = float(np.real(polar["CL"]))
+    cd = float(np.real(polar["CD"]))
+    cm = float(np.real(polar["CM"]))
+
+    with open(dst_path, "w", encoding="utf-8") as f:
+        f.write("alpha CL CD CM\n")
+        f.write(f"{alpha:.10e} {cl:.10e} {cd:.10e} {cm:.10e}\n")
+
+
+def _copy_or_dump_aero_outputs(run_dir, summary_dir, stem, res):
+    run_dir = Path(run_dir)
+    summary_dir = Path(summary_dir)
+
+    cp_src = run_dir / "cp.txt"
+    polar_src = run_dir / "polar.txt"
+
+    cp_dst = summary_dir / f"{stem}_cp.txt"
+    polar_dst = summary_dir / f"{stem}_polar.txt"
+
+    if cp_src.exists():
+        shutil.copy(cp_src, cp_dst)
+    else:
+        _write_cp_from_res(res, cp_dst)
+
+    if polar_src.exists():
+        shutil.copy(polar_src, polar_dst)
+    else:
+        _write_polar_from_res(res, polar_dst)
 
 def _build_seed_summary_text(seed, err_init, init_res, static_out, adaptive_runs, target_res=None):
     static_skipped = bool(static_out.get("is_skipped", False))
-    static_jcp, static_pcon, static_jtot = _extract_last_ok_objective_parts(static_out)
+    static_j = _extract_last_ok_j(static_out)
 
     lines = [
         "===== FINAL RECAP =====",
@@ -80,17 +121,13 @@ def _build_seed_summary_text(seed, err_init, init_res, static_out, adaptive_runs
 
     lines.extend([
         "",
-        f"Static last Jcp      = {_fmt_or_skipped(static_jcp, static_skipped)}",
-        f"Static last Pcon     = {_fmt_or_skipped(static_pcon, static_skipped)}",
-        f"Static last Jtot     = {_fmt_or_skipped(static_jtot, static_skipped)}",
+        f"Static last J        = {_fmt_or_skipped(static_j, static_skipped)}",
     ])
 
     for mode_key, out in adaptive_runs.items():
-        jcp, pcon, jtot = _extract_last_ok_objective_parts(out)
+        j_last = _extract_last_ok_j(out)
         tag = _mode_title(mode_key)
-        lines.append(f"{tag} last Jcp   = {jcp:.6e}")
-        lines.append(f"{tag} last Pcon  = {pcon:.6e}")
-        lines.append(f"{tag} last Jtot  = {jtot:.6e}")
+        lines.append(f"{tag} last J      = {j_last:.6e}")
 
     lines.append("")
 
@@ -144,7 +181,7 @@ def _build_seed_summary_text(seed, err_init, init_res, static_out, adaptive_runs
     lines.extend(
         [
             f"Static objective evals      = {'SKIPPED' if static_skipped else static_out['n_objective_evals']}",
-            f"Static XFOIL calls          = {'SKIPPED' if static_skipped else static_out['n_xfoil_calls_total']}",
+            f"Static aero calls          = {'SKIPPED' if static_skipped else static_out['n_xfoil_calls_total']}",
         ]
     )
 
@@ -154,7 +191,7 @@ def _build_seed_summary_text(seed, err_init, init_res, static_out, adaptive_runs
             [
                 f"{tag} evals opt        = {out['n_optimization_evals_total']}",
                 f"{tag} evals score      = {out['n_scoring_evals_total']}",
-                f"{tag} XFOIL calls      = {out['n_total_evals']}",
+                f"{tag} aero calls       = {out['n_total_evals']}",
             ]
         )
 
@@ -271,29 +308,33 @@ def save_seed_outputs(
     for mode_key, out in adaptive_runs.items():
         write_dat(summary_dir / f"{mode_key}_airfoil.dat", x, out["yu_opt"], out["yl_opt"], name=mode_key.upper())
 
-    shutil.copy(workdir / "target_run" / "cp.txt", summary_dir / "target_cp.txt")
-    shutil.copy(workdir / "target_run" / "polar.txt", summary_dir / "target_polar.txt")
-    shutil.copy(workdir / "initial_run" / "cp.txt", summary_dir / "initial_cp.txt")
-    shutil.copy(workdir / "initial_run" / "polar.txt", summary_dir / "initial_polar.txt")
+    _copy_or_dump_aero_outputs(
+        workdir / "target_run",
+        summary_dir,
+        "target",
+        target_res,
+    )
+    _copy_or_dump_aero_outputs(
+        workdir / "initial_run",
+        summary_dir,
+        "initial",
+        init_res,
+    )
 
     if not static_skipped:
-        shutil.copy(
-            workdir / "static" / "static_final_optimized_run" / "cp.txt",
-            summary_dir / "static_cp.txt",
-        )
-        shutil.copy(
-            workdir / "static" / "static_final_optimized_run" / "polar.txt",
-            summary_dir / "static_polar.txt",
+        _copy_or_dump_aero_outputs(
+            workdir / "static" / "static_final_optimized_run",
+            summary_dir,
+            "static",
+            static_out["opt_res"],
         )
 
     for mode_key, out in adaptive_runs.items():
-        shutil.copy(
-            workdir / mode_key / "adaptive" / f"adaptive_level_{out['ndv_total']}_optimized_run" / "cp.txt",
-            summary_dir / f"{mode_key}_cp.txt",
-        )
-        shutil.copy(
-            workdir / mode_key / "adaptive" / f"adaptive_level_{out['ndv_total']}_optimized_run" / "polar.txt",
-            summary_dir / f"{mode_key}_polar.txt",
+        _copy_or_dump_aero_outputs(
+            workdir / mode_key / "adaptive" / f"adaptive_level_{out['ndv_total']}_optimized_run",
+            summary_dir,
+            mode_key,
+            out["opt_res"],
         )
 
     with open(summary_dir / "summary.txt", "w", encoding="utf-8") as f:

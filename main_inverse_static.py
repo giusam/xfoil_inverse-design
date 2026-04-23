@@ -6,6 +6,8 @@ import numpy as np
 from settings import SETTINGS
 from geometry import build_naca0012_surfaces, build_random_initial_geometry, write_dat
 from xfoil_wrapper import clean_workdir, run_xfoil
+from cmplxfoil_wrapper import run_cmplxfoil
+from aero_wrapper import run_aero
 from cp_utils import split_upper_lower_cp_from_x
 from objective import total_cp_error
 from optimization import optimize_for_centers
@@ -17,7 +19,7 @@ from reporting import (
     print_aggregate_summary,
     print_initial_state,
     print_seed_recap,
-    report_initial_xfoil_failure,
+    report_initial_aero_failure,
     save_seed_outputs,
     write_global_summary,
 )
@@ -70,6 +72,20 @@ def _get_active_adaptive_modes():
         modes.append("ORACLE")
     return modes
 
+def run_target_aero(*args, **kwargs):
+    target_backend = SETTINGS.get("aero", {}).get(
+        "target_backend",
+        SETTINGS.get("aero", {}).get("backend", "xfoil"),
+    )
+    target_backend = str(target_backend).strip().lower()
+
+    if target_backend == "cmplxfoil":
+        return run_cmplxfoil(*args, **kwargs)
+
+    if target_backend == "xfoil":
+        return run_xfoil(*args, **kwargs)
+
+    raise ValueError(f"Unknown target backend: {target_backend}")
 
 def main():
     base_dir = Path(__file__).resolve().parent
@@ -132,7 +148,7 @@ def main():
         target_dat = Path(workdir) / "target_airfoil.dat"
         write_dat(target_dat, x, yu_target, yl_target, name="TARGET_NACA0012")
 
-        target_res = run_xfoil(
+        target_res = run_target_aero(
             airfoil_dat=target_dat,
             alpha_deg=SETTINGS["xfoil"]["alpha"],
             reynolds=SETTINGS["xfoil"]["Re"],
@@ -166,7 +182,7 @@ def main():
         init_dat = Path(workdir) / "initial_airfoil.dat"
         write_dat(init_dat, x, yu_init, yl_init, name="INITIAL_RANDOM")
 
-        init_res = run_xfoil(
+        init_res = run_aero(
             airfoil_dat=init_dat,
             alpha_deg=SETTINGS["xfoil"]["alpha"],
             reynolds=SETTINGS["xfoil"]["Re"],
@@ -176,7 +192,7 @@ def main():
         )
 
         if not init_res["success"]:
-            report_initial_xfoil_failure(summary_dir, seed, init_res)
+            report_initial_aero_failure(summary_dir, seed, init_res)
             cleanup_debug_files(workdir)
             continue
 

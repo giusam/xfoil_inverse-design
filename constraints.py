@@ -648,7 +648,7 @@ def build_slsqp_all_constraints(
     working_dir,
 ):
     from geometry import write_dat
-    from xfoil_wrapper import run_xfoil
+    from aero_wrapper import run_aero
     from settings import SETTINGS
 
     constraints = _build_geometric_constraint_functions(
@@ -696,7 +696,7 @@ def build_slsqp_all_constraints(
 
         write_dat(airfoil_dat, x, yu, yl, name=f"CONSTRAINT_{k:05d}")
 
-        res = run_xfoil(
+        res = run_aero(
             airfoil_dat=airfoil_dat,
             alpha_deg=alpha_deg,
             reynolds=reynolds,

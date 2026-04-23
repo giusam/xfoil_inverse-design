@@ -4,7 +4,7 @@ from pathlib import Path
 SETTINGS = {
 
     "run": {
-        "do_static": True,
+        "do_static": False,
         "do_adaptive_grad": True,
         "do_adaptive_ikkt": False,
         "do_adaptive_pred": False,
@@ -13,6 +13,7 @@ SETTINGS = {
 
     "xfoil": {
         "alpha": 2.0,
+        "mach": 0.001,
         "Re": 1e6,
         "xfoil_iter": 300,
         "timeout": 60,
@@ -21,6 +22,13 @@ SETTINGS = {
         "xtr_lower": 0.03,
     },
 
+    "aero": {
+        "backend": "cmplxfoil",      # "xfoil" oppure "cmplxfoil"
+        "target_backend": "cmplxfoil",       # "xfoil" oppure "cmplxfoil"
+        "derivatives": "fd",       # "fd" oppure "cs"
+        "quiet": True,             # Se True, sopprime output di XFOIL/CMPLXFOIL
+    },
+    
     "snapshots": {
         "enabled": True,
         "dir_name": "snapshots",
@@ -91,8 +99,8 @@ SETTINGS = {
     },
 
     "optimization": {
-        "hh_power": 6,
-        "n_hh_static": 16,
+        "hh_power": 4,
+        "n_hh_static": 20,
         "bounds": (-0.01, 0.01),
         "maxiter": 200,
         "ftol": 1.0e-8,
@@ -104,7 +112,7 @@ SETTINGS = {
         "adaptive": {
             "tol_active": 1.0e-3,
             "n0": 8,
-            "n_final": 16,
+            "n_final": 20,
             "n_add_per_level": 1,
             "growth_ratio": 1.25,
             "xmin": 0.05,

@@ -4,15 +4,17 @@ import numpy as np
 
 from settings import SETTINGS
 from geometry import apply_hicks_henne_deformation, write_dat
-from xfoil_wrapper import run_xfoil
+from aero_wrapper import run_aero
+from cmplxfoil_wrapper import run_cmplxfoil_coords
 from cp_utils import split_upper_lower_cp_from_x
 from constraints import compute_metrics
+
 
 def cp_error_interp(x_ref, cp_ref, x_cmp, cp_cmp):
     x_ref = np.asarray(x_ref, dtype=float)
     cp_ref = np.asarray(cp_ref, dtype=float)
     x_cmp = np.asarray(x_cmp, dtype=float)
-    cp_cmp = np.asarray(cp_cmp, dtype=float)
+    cp_cmp = np.asarray(cp_cmp)
 
     if len(x_ref) > 1 and x_ref[0] > x_ref[-1]:
         x_ref = x_ref[::-1]
@@ -27,9 +29,9 @@ def cp_error_interp(x_ref, cp_ref, x_cmp, cp_cmp):
 
     x_span = x_ref[-1] - x_ref[0]
     if x_span <= 0.0:
-        return float(np.mean(err_sq))
+        return np.mean(err_sq)
 
-    return float(np.trapezoid(err_sq, x_ref) / x_span)
+    return np.trapezoid(err_sq, x_ref) / x_span
 
 
 def total_cp_error(cp_target, cp_candidate):
@@ -70,6 +72,12 @@ def make_objective(
     working_dir = Path(working_dir)
     working_dir.mkdir(parents=True, exist_ok=True)
 
+    aero_backend = SETTINGS.get("aero", {}).get("backend", "xfoil").strip().lower()
+
+    cmplxfoil_template_dat = working_dir / "_cmplxfoil_template_airfoil.dat"
+    cmplxfoil_real_session_key = f"{working_dir.resolve()}::cmplxfoil_real"
+    cmplxfoil_cs_session_key = f"{working_dir.resolve()}::cmplxfoil_cs"
+
     upper_centers = list(upper_centers)
     lower_centers = list(lower_centers)
 
@@ -109,15 +117,20 @@ def make_objective(
             grads = " ".join(f"{float(gi):.10e}" for gi in np.asarray(g_vec, dtype=float))
             f.write(f"{k:05d} {grads}\n")
 
-    def objective(a):
-        eval_counter["k"] += 1
-        k = eval_counter["k"]
-
+    def _split_a(a):
         nu = len(upper_centers)
         nl = len(lower_centers)
 
-        a_upper = np.asarray(a[:nu], dtype=float)
-        a_lower = np.asarray(a[nu:nu + nl], dtype=float)
+        a_upper = np.asarray(a[:nu])
+        a_lower = np.asarray(a[nu:nu + nl])
+
+        if len(a_lower) != nl:
+            raise ValueError("Invalid design vector length in objective evaluation.")
+
+        return a_upper, a_lower
+
+    def _build_geometry(a):
+        a_upper, a_lower = _split_a(a)
 
         yu, yl = apply_hicks_henne_deformation(
             x=x,
@@ -129,13 +142,25 @@ def make_objective(
             lower_centers=lower_centers,
             power=hh_power,
         )
+        return yu, yl
 
+    def _thickness_check(yu, yl):
         thickness = yu - yl
-        min_thickness = np.min(thickness)
-        thickness_internal = thickness[1:-1]
+        thickness_real = np.real(thickness)
+        min_thickness = np.min(thickness_real)
+        thickness_internal = thickness_real[1:-1]
         thickness_tol = -1.0e-10
+        fail = np.any(thickness_internal < thickness_tol)
+        return fail, min_thickness
 
-        if np.any(thickness_internal < thickness_tol):
+    def _evaluate_objective_real(a):
+        eval_counter["k"] += 1
+        k = eval_counter["k"]
+
+        yu, yl = _build_geometry(a)
+        fail_thickness, min_thickness = _thickness_check(yu, yl)
+
+        if fail_thickness:
             penalty_value = get_penalty()
             print(
                 f"eval={k:04d}  FAIL thickness  "
@@ -153,30 +178,55 @@ def make_objective(
             )
             return penalty_value
 
-        airfoil_dat = working_dir / f"candidate_{k:05d}.dat"
-        write_dat(airfoil_dat, x, yu, yl, name=f"CAND_{k:05d}")
+        if aero_backend == "cmplxfoil":
+            if not cmplxfoil_template_dat.exists():
+                write_dat(
+                    cmplxfoil_template_dat,
+                    x,
+                    np.real(yu_init),
+                    np.real(yl_init),
+                    name="CMPLXFOIL_TEMPLATE",
+                )
 
-        run_dir = working_dir / f"candidate_run_{k:05d}"
+            run_dir = working_dir / "cmplxfoil_objective_run"
 
-        res = run_xfoil(
-            airfoil_dat=airfoil_dat,
-            alpha_deg=alpha_deg,
-            reynolds=reynolds,
-            xfoil_iter=xfoil_iter,
-            timeout=timeout,
-            working_dir=run_dir,
-        )
+            res = run_cmplxfoil_coords(
+                airfoil_dat=cmplxfoil_template_dat,
+                x=x,
+                yu=yu,
+                yl=yl,
+                alpha_deg=alpha_deg,
+                reynolds=reynolds,
+                xfoil_iter=xfoil_iter,
+                timeout=timeout,
+                working_dir=run_dir,
+                session_key=cmplxfoil_real_session_key,
+            )
+        else:
+            airfoil_dat = working_dir / f"candidate_{k:05d}.dat"
+            write_dat(airfoil_dat, x, yu, yl, name=f"CAND_{k:05d}")
+
+            run_dir = working_dir / f"candidate_run_{k:05d}"
+
+            res = run_aero(
+                airfoil_dat=airfoil_dat,
+                alpha_deg=alpha_deg,
+                reynolds=reynolds,
+                xfoil_iter=xfoil_iter,
+                timeout=timeout,
+                working_dir=run_dir,
+            )
         if not res["success"]:
             penalty_value = get_penalty()
-            print(f"eval={k:04d}  FAIL xfoil  penalty={penalty_value:.6e}")
+            print(f"eval={k:04d}  FAIL aero  penalty={penalty_value:.6e}")
 
-            _append_a_history(k, "FAIL_XFOIL", penalty_value, a)
+            _append_a_history(k, "FAIL_AERO", penalty_value, a)
 
             eval_history.append(
                 {
                     "eval": k,
                     "objective": penalty_value,
-                    "status": "FAIL_XFOIL",
+                    "status": "FAIL_AERO",
                 }
             )
             return penalty_value
@@ -187,18 +237,12 @@ def make_objective(
         )
 
         err = total_cp_error(cp_target, cp_candidate)
-
         metrics = compute_metrics(x, yu, yl, res["polar"])
-        constraint_penalty = 0.0
-        constraint_details = {}
-
         objective_total = err
 
         print(
             f"eval={k:04d}  OK   "
-            f"Jcp={err:.6e}  "
-            f"Pcon={constraint_penalty:.6e}  "
-            f"Jtot={objective_total:.6e}  "
+            f"J={err:.6e}  "
             f"min_thickness={min_thickness:.6e}"
         )
 
@@ -209,14 +253,87 @@ def make_objective(
                 "eval": k,
                 "objective": objective_total,
                 "objective_base": err,
-                "constraint_penalty": constraint_penalty,
                 "metrics": metrics,
-                "constraints": constraint_details,
                 "status": "OK",
             }
         )
 
         return objective_total
+
+    def _evaluate_aero_state_cs(a, enabled_metric_names=None):
+        if aero_backend != "cmplxfoil":
+            raise RuntimeError("Complex-step aero evaluation requires aero.backend='cmplxfoil'.")
+
+        if enabled_metric_names is None:
+            enabled_metric_names = []
+
+        yu, yl = _build_geometry(a)
+        fail_thickness, _ = _thickness_check(yu, yl)
+
+        if fail_thickness:
+            return None
+
+        if not cmplxfoil_template_dat.exists():
+            write_dat(
+                cmplxfoil_template_dat,
+                x,
+                np.real(yu_init),
+                np.real(yl_init),
+                name="CMPLXFOIL_TEMPLATE",
+            )
+
+        cs_run_dir = working_dir / "cmplxfoil_cs_run"
+
+        res = run_cmplxfoil_coords(
+            airfoil_dat=cmplxfoil_template_dat,
+            x=x,
+            yu=yu,
+            yl=yl,
+            alpha_deg=alpha_deg,
+            reynolds=reynolds,
+            xfoil_iter=xfoil_iter,
+            timeout=timeout,
+            working_dir=cs_run_dir,
+            session_key=cmplxfoil_cs_session_key,
+        )
+
+        if not res["success"] or res.get("polar") is None or res.get("cp_data") is None:
+            return None
+
+        cp_candidate = split_upper_lower_cp_from_x(
+            res["cp_data"]["x"],
+            res["cp_data"]["cp"],
+        )
+
+        err = total_cp_error(cp_target, cp_candidate)
+
+        metrics = {}
+        polar = res["polar"]
+
+        for name in enabled_metric_names:
+            if name == "CL":
+                metrics[name] = polar["CL"]
+            elif name == "CD":
+                metrics[name] = polar["CD"]
+            elif name == "CM":
+                metrics[name] = polar["CM"]
+            else:
+                raise ValueError(f"Unsupported aero metric for CS gradients: {name}")
+
+        return {
+            "objective_base": err,
+            "metrics": metrics,
+            "polar": polar,
+        }
+
+    def _evaluate_objective_cs(a):
+        state_cs = _evaluate_aero_state_cs(a, enabled_metric_names=[])
+        if state_cs is None:
+            return complex(get_penalty(), 0.0)
+        return state_cs["objective_base"]
+
+    def objective(a):
+        return _evaluate_objective_real(a)
 
     def compute_gradient_snapshot(a, h=2.0e-5):
         g = np.zeros_like(a, dtype=float)
@@ -241,11 +358,69 @@ def make_objective(
 
         return g
 
+    def compute_gradient_cs(a, h=1.0e-200):
+        a0 = np.asarray(a, dtype=float)
+        g = np.zeros_like(a0, dtype=float)
+
+        for j in range(len(a0)):
+            a_cs = np.asarray(a0, dtype=complex).copy()
+            a_cs[j] += 1j * h
+
+            J_cs = _evaluate_objective_cs(a_cs)
+            g[j] = np.imag(J_cs) / h
+
+        return g
+
+    def compute_aero_gradients_cs(a, enabled_metric_names, h=1.0e-200):
+        if aero_backend != "cmplxfoil":
+            raise RuntimeError("Complex-step aero gradients require aero.backend='cmplxfoil'.")
+
+        a0 = np.asarray(a, dtype=float)
+        grad_j = np.zeros_like(a0, dtype=float)
+        grad_metrics = {name: np.zeros_like(a0, dtype=float) for name in enabled_metric_names}
+
+        n_fail_dirs = 0
+        fail_indices = []
+
+        for j in range(len(a0)):
+            a_cs = np.asarray(a0, dtype=complex).copy()
+            a_cs[j] += 1j * h
+
+            state_cs = _evaluate_aero_state_cs(
+                a_cs,
+                enabled_metric_names=enabled_metric_names,
+            )
+
+            if state_cs is None:
+                n_fail_dirs += 1
+                fail_indices.append(j)
+                grad_j[j] = 0.0
+                for name in enabled_metric_names:
+                    grad_metrics[name][j] = 0.0
+                continue
+
+            grad_j[j] = np.imag(state_cs["objective_base"]) / h
+
+            for name in enabled_metric_names:
+                grad_metrics[name][j] = np.imag(state_cs["metrics"][name]) / h
+
+        diag = {
+            "n_fail_dirs": n_fail_dirs,
+            "fail_indices": fail_indices,
+            "ndv": len(a0),
+            "mode": "CS",
+        }
+
+        return grad_j, grad_metrics, diag
+
     objective.eval_counter = eval_counter
     objective.eval_history = eval_history
     objective.get_penalty = get_penalty
     objective.a_history_path = a_history_path
     objective.grad_history_path = grad_history_path
     objective.compute_gradient_snapshot = compute_gradient_snapshot
+    objective.compute_gradient_cs = compute_gradient_cs
+    objective.compute_aero_gradients_cs = compute_aero_gradients_cs
+    objective.evaluate_cs = _evaluate_objective_cs
     objective.append_grad_history = _append_grad_history
     return objective

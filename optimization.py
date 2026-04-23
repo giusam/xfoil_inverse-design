@@ -5,11 +5,11 @@ from scipy.optimize import minimize
 
 from settings import SETTINGS
 from geometry import apply_hicks_henne_deformation, build_normal_peak_fd_steps, write_dat
-from xfoil_wrapper import run_xfoil
+from aero_wrapper import run_aero
 from cp_utils import split_upper_lower_cp_from_x
 from objective import make_objective, total_cp_error
 from constraints import build_slsqp_all_constraints
-
+from cmplxfoil_wrapper import clear_cmplxfoil_solver_cache
 
 def _status_of_last_eval(objective):
     if not hasattr(objective, "eval_history") or len(objective.eval_history) == 0:
@@ -132,6 +132,9 @@ def optimize_for_centers(
 ):
     hh_power = SETTINGS["optimization"]["hh_power"]
 
+    if SETTINGS.get("aero", {}).get("backend", "xfoil").strip().lower() == "cmplxfoil":
+        clear_cmplxfoil_solver_cache()
+
     upper_centers = list(upper_centers)
     lower_centers = list(lower_centers)
 
@@ -171,6 +174,9 @@ def optimize_for_centers(
     a0 = np.asarray(a0, dtype=float)
 
     jac_target_peak_normal = SETTINGS["optimization"]["opt_fd_target_peak_normal"]
+    deriv_mode = SETTINGS.get("aero", {}).get("derivatives", "fd").strip().lower()
+    if deriv_mode not in {"fd", "cs"}:
+        raise ValueError(f"Unknown derivative mode: {deriv_mode}")
 
     def jac_explicit(a_vec):
         return _compute_explicit_jac(
@@ -187,13 +193,18 @@ def optimize_for_centers(
 
     # Gradient snapshots for debug/scaling analysis
     def _save_gradient_snapshot(tag, a_vec):
-        if not hasattr(objective, "compute_gradient_snapshot"):
-            return
         if not hasattr(objective, "append_grad_history"):
             return
 
         print(f"\n>>> Computing gradient snapshot: {tag}")
-        g_vec = objective.compute_gradient_snapshot(np.asarray(a_vec, dtype=float))
+
+        if deriv_mode == "cs" and hasattr(objective, "compute_gradient_cs"):
+            g_vec = objective.compute_gradient_cs(np.asarray(a_vec, dtype=float))
+        elif hasattr(objective, "compute_gradient_snapshot"):
+            g_vec = objective.compute_gradient_snapshot(np.asarray(a_vec, dtype=float))
+        else:
+            return
+
         objective.append_grad_history(objective.eval_counter["k"], g_vec)
 
         grad_norm = np.linalg.norm(g_vec)
@@ -207,15 +218,25 @@ def optimize_for_centers(
     print(f"Initial objective value at a0 = {j0:.6e}")
     print(f"Failure penalty value         = {objective.get_penalty():.6e}")
     print(f"SLSQP constraints             = {len(all_constraints)}")
-    print("Jacobian mode                 = EXPLICIT_FD")
-    print(f"jac_target_peak_normal        = {jac_target_peak_normal:.6e}")
-    _save_gradient_snapshot(f"{label}_initial", a0)
+    if deriv_mode == "cs":
+        print("Jacobian mode                 = COMPLEX_STEP")
+    else:
+        print("Jacobian mode                 = EXPLICIT_FD")
+        print(f"jac_target_peak_normal        = {jac_target_peak_normal:.6e}")
+    #_save_gradient_snapshot(f"{label}_initial", a0)
+
+    if deriv_mode == "cs":
+        if not hasattr(objective, "compute_gradient_cs"):
+            raise RuntimeError("Objective does not expose compute_gradient_cs().")
+        jac_fun = lambda a_vec: objective.compute_gradient_cs(np.asarray(a_vec, dtype=float))
+    else:
+        jac_fun = jac_explicit
 
     result = minimize(
         objective,
         a0,
         method="SLSQP",
-        jac=jac_explicit,
+        jac=jac_fun,
         bounds=bounds,
         constraints=all_constraints,
         options={
@@ -233,7 +254,7 @@ def optimize_for_centers(
     print("nit     :", result.nit)
 
     a_opt = np.asarray(result.x, dtype=float)
-    _save_gradient_snapshot(f"{label}_final", a_opt)
+    #_save_gradient_snapshot(f"{label}_final", a_opt)
 
     nu = len(upper_centers)
     nl = len(lower_centers)
@@ -254,7 +275,7 @@ def optimize_for_centers(
     opt_dat = Path(workdir) / f"{label}_optimized_airfoil.dat"
     write_dat(opt_dat, x, yu_opt, yl_opt, name=f"{label.upper()}_OPTIMIZED")
 
-    opt_res = run_xfoil(
+    opt_res = run_aero(
         airfoil_dat=opt_dat,
         alpha_deg=SETTINGS["xfoil"]["alpha"],
         reynolds=SETTINGS["xfoil"]["Re"],
@@ -277,6 +298,9 @@ def optimize_for_centers(
 
     n_objective_evals = objective.eval_counter["k"]
     n_xfoil_calls_total = n_objective_evals + 1
+
+    if SETTINGS.get("aero", {}).get("backend", "xfoil").strip().lower() == "cmplxfoil":
+        clear_cmplxfoil_solver_cache()
 
     return {
         "upper_centers": np.asarray(upper_centers, dtype=float),
