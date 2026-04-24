@@ -12,7 +12,8 @@ from adaptive_utils import (
 )
 from adaptive_scoring import score_candidate
 from adaptive_pred import _prepare_pred_level_context
-
+import gc
+from cmplxfoil_wrapper import clear_cmplxfoil_solver_cache
 
 def _save_level_snapshot(
     x,
@@ -399,6 +400,7 @@ def run_adaptive_strategy(
 
         current_ndv = len(upper_centers) + len(lower_centers)
         scored_local = []
+
         for cand in candidates:
             if str(indicator).upper() == "ORACLE":
                 info = _score_candidate_oracle(
@@ -412,7 +414,7 @@ def run_adaptive_strategy(
                     candidate=cand,
                     current_best_error=current_best_error,
                     workdir=Path(workdir),
-                    level_ndv=current_ndv
+                    level_ndv=current_ndv,
                 )
             else:
                 info = score_candidate(
@@ -453,6 +455,10 @@ def run_adaptive_strategy(
         scored = reduce_to_best_candidate_per_interval(scored_local)
         scored.sort(key=lambda item: (-item["score"], item["x"]))
         _print_candidate_diagnostics(scored, topk=12)
+
+        if str(SETTINGS.get("aero", {}).get("backend", "xfoil")).strip().lower() == "cmplxfoil":
+            clear_cmplxfoil_solver_cache()
+            gc.collect()
 
         
         n_remaining = n_final - current_ndv

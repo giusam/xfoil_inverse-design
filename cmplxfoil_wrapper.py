@@ -13,9 +13,34 @@ from cmplxfoil import CMPLXFOIL
 
 _CMPLXFOIL_SOLVER_CACHE = {}
 
+def _clear_cmplxfoil_runtime_data(solver):
+    """
+    Clear large per-run dictionaries stored inside the CMPLXFOIL solver.
+
+    The solver object can still be reused from the cache, but old real/complex
+    function and slice data are not kept in memory.
+    """
+    for attr in ("funcs", "funcsComplex", "sliceData", "sliceDataComplex"):
+        obj = getattr(solver, attr, None)
+        if isinstance(obj, dict):
+            obj.clear()
 
 def clear_cmplxfoil_solver_cache():
+    import gc
+
+    for solver in list(_CMPLXFOIL_SOLVER_CACHE.values()):
+        _clear_cmplxfoil_runtime_data(solver)
+
+        for method_name in ("cleanup", "close", "free", "destroy"):
+            method = getattr(solver, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                except Exception:
+                    pass
+
     _CMPLXFOIL_SOLVER_CACHE.clear()
+    gc.collect()
 
 
 def _cmplxfoil_solver_cache_key(session_key, airfoil_dat, xtr_upper, xtr_lower, xfoil_iter):
@@ -276,6 +301,7 @@ def run_cmplxfoil_coords(
 
     stdout_lines = []
     stderr_lines = []
+    solver = None
 
     try:
         ap = AeroProblem(
@@ -349,16 +375,18 @@ def run_cmplxfoil_coords(
         }
 
     except Exception as e:
-        stderr_lines.append(str(e))
         return {
             "success": False,
-            "stdout": "\n".join(stdout_lines),
-            "stderr": "\n".join(stderr_lines),
-            "returncode": -1,
             "polar": None,
             "cp_data": None,
-            "workdir_files": sorted([p.name for p in workdir.iterdir()]) if workdir.exists() else [],
+            "stdout": "",
+            "stderr": str(e),
+            "error": str(e),
         }
+
+    finally:
+        if solver is not None:
+            _clear_cmplxfoil_runtime_data(solver)
     
 def run_cmplxfoil(
     airfoil_dat,

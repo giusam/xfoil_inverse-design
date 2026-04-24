@@ -58,6 +58,16 @@ def _make_candidate_objective(
     side,
     xc,
 ):
+    backend = str(SETTINGS.get("aero", {}).get("backend", "xfoil")).strip().lower()
+
+    if backend == "cmplxfoil":
+        # Reuse one shared CMPLXFOIL scoring session instead of creating
+        # one solver/session per candidate.
+        score_workdir = Path(workdir) / "score_shared"
+    else:
+        # Keep separate folders for XFOIL/debug output.
+        score_workdir = Path(workdir) / f"score_{side}_{xc:.6f}"
+
     return make_objective(
         x=x,
         yu_init=yu_init,
@@ -70,7 +80,7 @@ def _make_candidate_objective(
         reynolds=SETTINGS["xfoil"]["Re"],
         xfoil_iter=SETTINGS["xfoil"]["xfoil_iter"],
         timeout=SETTINGS["xfoil"]["timeout"],
-        working_dir=Path(workdir) / f"score_{side}_{xc:.6f}",
+        working_dir=score_workdir,
         current_best_error=current_best_error,
     )
 
