@@ -121,6 +121,22 @@ SETTINGS = {
             "interval_sampling_fractions": [0.25, 0.5, 0.75],
         },
     },
+
+    "spring_reallocation": {
+        "enabled": False,
+        "n_dv": 20,
+        "n_cycles": 1,
+        "weight_mode": "abs_a",
+        "restart_mode": "project",
+        "A": 10.0,
+        "omega": 0.25,
+        "max_dx": 0.05,
+        "min_spacing": 0.02,
+        "ridge": 1.0e-10,
+        "fix_ends": True,
+        "transfer_mode": "sin",
+        "transfer_power": 1.0,
+    },
 }
 def _parse_cfg_value(raw: str):
     s = raw.strip()
@@ -216,6 +232,23 @@ _CFG_KEY_MAP = {
     "ADAPT_XMAX": ("optimization", "adaptive", "xmax"),
     "ADAPT_INTERVAL_SAMPLING_MODE": ("optimization", "adaptive", "interval_sampling_mode"),
     "ADAPT_INTERVAL_SAMPLING_FRACTIONS": ("optimization", "adaptive", "interval_sampling_fractions"),
+
+    # ---------------------------
+    # spring_reallocation
+    # ---------------------------
+    "SPRING_REALLOC_ENABLED": ("spring_reallocation", "enabled"),
+    "SPRING_REALLOC_N_DV": ("spring_reallocation", "n_dv"),
+    "SPRING_REALLOC_N_CYCLES": ("spring_reallocation", "n_cycles"),
+    "SPRING_REALLOC_WEIGHT_MODE": ("spring_reallocation", "weight_mode"),
+    "SPRING_REALLOC_RESTART_MODE": ("spring_reallocation", "restart_mode"),
+    "SPRING_REALLOC_A": ("spring_reallocation", "A"),
+    "SPRING_REALLOC_OMEGA": ("spring_reallocation", "omega"),
+    "SPRING_REALLOC_MAX_DX": ("spring_reallocation", "max_dx"),
+    "SPRING_REALLOC_MIN_SPACING": ("spring_reallocation", "min_spacing"),
+    "SPRING_REALLOC_RIDGE": ("spring_reallocation", "ridge"),
+    "SPRING_REALLOC_FIX_ENDS": ("spring_reallocation", "fix_ends"),
+    "SPRING_REALLOC_TRANSFER_MODE": ("spring_reallocation", "transfer_mode"),
+    "SPRING_REALLOC_TRANSFER_POWER": ("spring_reallocation", "transfer_power"),
 
     # ---------------------------
     # constraints: CL
