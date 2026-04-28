@@ -145,6 +145,14 @@ SETTINGS = {
         "transfer_mode": "sin",
         "transfer_power": 1.0,
     },
+
+    "periodic_spring_adaptive": {
+        "enabled": False,
+        "levels": [12, 16, 20],
+        "accept_mode_intermediate": "rebase_keep_new_centers",
+        "accept_mode_final": "accept_if_improved",
+        "force_grad_score_mode": "grad_norm",
+    },
 }
 def _parse_cfg_value(raw: str):
     s = raw.strip()
@@ -265,6 +273,15 @@ _CFG_KEY_MAP = {
     "SPRING_REALLOC_FIX_ENDS": ("spring_reallocation", "fix_ends"),
     "SPRING_REALLOC_TRANSFER_MODE": ("spring_reallocation", "transfer_mode"),
     "SPRING_REALLOC_TRANSFER_POWER": ("spring_reallocation", "transfer_power"),
+
+    # ---------------------------
+    # periodic_spring_adaptive
+    # ---------------------------
+    "PERIODIC_SPRING_ENABLED": ("periodic_spring_adaptive", "enabled"),
+    "PERIODIC_SPRING_LEVELS": ("periodic_spring_adaptive", "levels"),
+    "PERIODIC_SPRING_ACCEPT_MODE_INTERMEDIATE": ("periodic_spring_adaptive", "accept_mode_intermediate"),
+    "PERIODIC_SPRING_ACCEPT_MODE_FINAL": ("periodic_spring_adaptive", "accept_mode_final"),
+    "PERIODIC_SPRING_FORCE_GRAD_SCORE_MODE": ("periodic_spring_adaptive", "force_grad_score_mode"),
 
     # ---------------------------
     # constraints: CL

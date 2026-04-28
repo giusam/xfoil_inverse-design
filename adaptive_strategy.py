@@ -800,3 +800,304 @@ def run_adaptive_strategy(
         adaptive_out["grad_score_mode"] = grad_score_mode
 
     return adaptive_out
+
+
+def run_adaptive_strategy_from_state(
+    x,
+    yu_init,
+    yl_init,
+    cp_target,
+    initial_error,
+    workdir,
+    indicator,
+    initial_upper_centers,
+    initial_lower_centers,
+    initial_a0,
+    n_final_override,
+):
+    opt_ad = SETTINGS["optimization"]["adaptive"]
+    indicator_u = str(indicator).upper()
+    grad_score_mode = str(opt_ad.get("grad_score_mode", "grad_norm")).strip().lower()
+    if indicator_u == "GRAD":
+        allowed_grad_score_modes = {"grad_norm", "grad_new", "grad_orth", "gn_schur"}
+        if grad_score_mode not in allowed_grad_score_modes:
+            raise ValueError(
+                f"Unknown ADAPT_GRAD_SCORE_MODE={grad_score_mode!r}; "
+                f"expected one of {sorted(allowed_grad_score_modes)}"
+            )
+        print(f"ADAPT_GRAD score mode = {grad_score_mode}")
+
+    upper_centers = sorted(float(v) for v in initial_upper_centers)
+    lower_centers = sorted(float(v) for v in initial_lower_centers)
+    a0 = np.asarray(initial_a0, dtype=float)
+    n_final = int(n_final_override)
+    current_best_error = float(initial_error)
+
+    history = []
+    center_history = []
+    selection_history = []
+    history_full = []
+    history_full_opt = []
+    history_evals = []
+    history_opt_aero_calls = []
+    history_function_evals = []
+    history_gradient_evals = []
+    n_scoring_aero_calls_total = 0
+    n_optimization_aero_calls_total = 0
+    n_function_evals_total = 0
+    n_gradient_evals_total = 0
+
+    adaptive_out = optimize_for_centers(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        cp_target=cp_target,
+        upper_centers=upper_centers,
+        lower_centers=lower_centers,
+        a0=a0,
+        label=f"adaptive_from_state_level_{len(upper_centers) + len(lower_centers)}",
+        current_best_error=current_best_error,
+        workdir=Path(workdir) / "adaptive",
+    )
+
+    current_best_error = adaptive_out["err_opt"]
+    n_optimization_aero_calls_total += adaptive_out["n_optimization_aero_calls_total"]
+    n_function_evals_total += adaptive_out["n_function_evals"]
+    n_gradient_evals_total += adaptive_out["n_gradient_evals"]
+
+    def _record_level(out):
+        history.append((out["ndv_total"], out["err_opt"]))
+        history_evals.append(n_optimization_aero_calls_total)
+        history_opt_aero_calls.append(n_optimization_aero_calls_total)
+        history_function_evals.append(n_function_evals_total)
+        history_gradient_evals.append(n_gradient_evals_total)
+        history_full.append(
+            {
+                "ndv_total": out["ndv_total"],
+                "eval_offset_end": n_optimization_aero_calls_total,
+                "objective_history": [dict(item) for item in out["objective_history"]],
+            }
+        )
+        history_full_opt.append(
+            {
+                "ndv_total": out["ndv_total"],
+                "opt_aero_offset_end": n_optimization_aero_calls_total,
+                "function_eval_offset_end": n_function_evals_total,
+                "gradient_eval_offset_end": n_gradient_evals_total,
+                "function_eval_history": [dict(item) for item in out["function_eval_history"]],
+                "gradient_eval_history": [dict(item) for item in out["gradient_eval_history"]],
+            }
+        )
+        center_history.append(
+            {
+                "ndv_total": out["ndv_total"],
+                "upper": list(upper_centers),
+                "lower": list(lower_centers),
+            }
+        )
+
+    _record_level(adaptive_out)
+
+    while (len(upper_centers) + len(lower_centers)) < n_final:
+        candidates = list(build_interval_candidates(upper_centers, side="UPPER"))
+        candidates.extend(build_interval_candidates(lower_centers, side="LOWER"))
+        if len(candidates) == 0:
+            break
+
+        pred_context = None
+        if indicator_u == "PRED":
+            pred_context = _prepare_pred_level_context(
+                x=x,
+                yu_init=yu_init,
+                yl_init=yl_init,
+                cp_target=cp_target,
+                upper_centers=upper_centers,
+                lower_centers=lower_centers,
+                a_opt=np.asarray(adaptive_out["a_opt"], dtype=float),
+                current_best_error=current_best_error,
+                workdir=Path(workdir) / "adaptive_candidate_scoring",
+            )
+            n_scoring_aero_calls_total += int(pred_context.get("n_scoring_aero_calls", 0))
+
+        current_ndv = len(upper_centers) + len(lower_centers)
+        gn_context = None
+        if indicator_u == "GRAD" and grad_score_mode == "gn_schur":
+            gn_context = prepare_gn_schur_level_context(
+                x=x,
+                yu_init=yu_init,
+                yl_init=yl_init,
+                cp_target=cp_target,
+                active_upper=upper_centers,
+                active_lower=lower_centers,
+                active_a=np.asarray(adaptive_out["a_opt"], dtype=float),
+                current_best_error=current_best_error,
+                workdir=Path(workdir) / "adaptive_candidate_scoring",
+            )
+            n_scoring_aero_calls_total += int(gn_context.get("n_scoring_aero_calls", 0))
+
+        scored_local = []
+        for cand in candidates:
+            info = score_candidate(
+                x=x,
+                yu_init=yu_init,
+                yl_init=yl_init,
+                cp_target=cp_target,
+                active_upper=upper_centers,
+                active_lower=lower_centers,
+                active_a=adaptive_out["a_opt"],
+                candidate=cand,
+                current_best_error=current_best_error,
+                workdir=Path(workdir) / "adaptive_candidate_scoring",
+                indicator=indicator,
+                pred_context=pred_context,
+                gn_context=gn_context,
+            )
+            n_scoring_aero_calls_total += int(info["n_scoring_aero_calls"])
+            scored_local.append(
+                {
+                    "side": info["side"],
+                    "x": info["x"],
+                    "interval_id": cand["interval_id"],
+                    "interval_label": cand.get("interval_label", f"{cand['side']}_{cand['interval_id']:02d}"),
+                    "x_left": float(cand["x_left"]),
+                    "x_right": float(cand["x_right"]),
+                    "local_fraction": float(cand.get("local_fraction", 0.5)),
+                    "score": info["score"],
+                    "component": info["component"],
+                    "raw_grad": info["raw_grad"],
+                    "active_names": list(info["active_names"]),
+                    "lambda": np.array(info["lambda"], copy=True),
+                    "mode": info["mode"],
+                    "score_mode": info.get("score_mode", ""),
+                    "g_norm": info.get("g_norm", np.nan),
+                    "g_new": info.get("g_new", info.get("raw_grad", np.nan)),
+                    "abs_g_new": info.get("abs_g_new", abs(float(info.get("raw_grad", np.nan))) if np.isfinite(info.get("raw_grad", np.nan)) else np.nan),
+                    "novelty_distance": info.get("novelty_distance", np.nan),
+                    "novelty_factor": info.get("novelty_factor", np.nan),
+                    "max_corr_geo": info.get("max_corr_geo", np.nan),
+                    "norm_phi": info.get("norm_phi", np.nan),
+                    "projection_residual_norm": info.get("projection_residual_norm", np.nan),
+                    "projection_rank": info.get("projection_rank", 0),
+                    "gn_g_perp": info.get("gn_g_perp", np.nan),
+                    "gn_q_schur": info.get("gn_q_schur", np.nan),
+                    "gn_alpha_unclipped": info.get("gn_alpha_unclipped", np.nan),
+                    "gn_alpha_clipped": info.get("gn_alpha_clipped", np.nan),
+                    "gn_norm_jc": info.get("gn_norm_jc", np.nan),
+                    "gn_norm_z": info.get("gn_norm_z", np.nan),
+                    "gn_rank_A": info.get("gn_rank_A", np.nan),
+                    "gn_fd_mode": info.get("gn_fd_mode", ""),
+                    "gn_fd_h": info.get("gn_fd_h", np.nan),
+                    "gn_n_fail_candidate": info.get("gn_n_fail_candidate", np.nan),
+                }
+            )
+
+        if indicator_u == "GRAD" and bool(opt_ad.get("write_candidate_score_csv", True)):
+            csv_path = _write_candidate_score_csv(
+                workdir=workdir,
+                level=current_ndv,
+                ndv_current=current_ndv,
+                scored_candidates=scored_local,
+            )
+            if csv_path is not None:
+                print(f"Candidate score CSV written: {csv_path[0]}")
+                print(f"Persistent candidate score CSV written: {csv_path[1]}")
+
+        scored = reduce_to_best_candidate_per_interval(scored_local)
+        scored.sort(key=lambda item: (-item["score"], item["x"]))
+        _print_candidate_diagnostics(scored, topk=12)
+
+        if str(SETTINGS.get("aero", {}).get("backend", "xfoil")).strip().lower() == "cmplxfoil":
+            clear_cmplxfoil_solver_cache()
+            gc.collect()
+
+        n_remaining = n_final - current_ndv
+        n_add = min(_compute_adaptive_nadd(current_ndv, len(scored)), n_remaining)
+        if n_add <= 0:
+            break
+
+        chosen = scored[:n_add]
+        print("===== ADAPTIVE REFINE FROM STATE =====")
+        print(f"current ndv       = {current_ndv}")
+        print(f"target ndv        = {n_final}")
+        print(f"current best err  = {current_best_error:.6e}")
+        print("chosen candidates =")
+        for cand in chosen:
+            print(f"  {_format_selected_candidate_summary(indicator, cand)}")
+
+        new_upper = sorted(list(upper_centers))
+        new_lower = sorted(list(lower_centers))
+        for cand in chosen:
+            if cand["side"] == "UPPER":
+                new_upper.append(float(cand["x"]))
+            else:
+                new_lower.append(float(cand["x"]))
+        new_upper = sorted(set(new_upper))
+        new_lower = sorted(set(new_lower))
+
+        selection_history.append(
+            {
+                "ndv_before": current_ndv,
+                "indicator": indicator_u,
+                "selected_candidates": [
+                    {
+                        "side": cand["side"],
+                        "interval_id": int(cand["interval_id"]),
+                        "interval_label": str(cand.get("interval_label", cand["interval_id"])),
+                        "x_left": float(cand["x_left"]),
+                        "x_right": float(cand["x_right"]),
+                        "local_fraction": float(cand.get("local_fraction", 0.5)),
+                        "center": float(cand["x"]),
+                        "score": float(cand["score"]),
+                    }
+                    for cand in chosen
+                ],
+            }
+        )
+
+        new_a0 = lift_a_to_new_side_centers(
+            old_upper=upper_centers,
+            old_lower=lower_centers,
+            old_a=adaptive_out["a_opt"],
+            new_upper=new_upper,
+            new_lower=new_lower,
+        )
+        upper_centers = new_upper
+        lower_centers = new_lower
+        level_label = f"adaptive_from_state_level_{len(new_upper) + len(new_lower)}"
+        adaptive_out = optimize_for_centers(
+            x=x,
+            yu_init=yu_init,
+            yl_init=yl_init,
+            cp_target=cp_target,
+            upper_centers=upper_centers,
+            lower_centers=lower_centers,
+            a0=new_a0,
+            label=level_label,
+            current_best_error=current_best_error,
+            workdir=Path(workdir) / "adaptive",
+        )
+        current_best_error = adaptive_out["err_opt"]
+        n_optimization_aero_calls_total += adaptive_out["n_optimization_aero_calls_total"]
+        n_function_evals_total += adaptive_out["n_function_evals"]
+        n_gradient_evals_total += adaptive_out["n_gradient_evals"]
+        _record_level(adaptive_out)
+
+    adaptive_out["history"] = history
+    adaptive_out["history_evals"] = history_evals
+    adaptive_out["history_full"] = history_full
+    adaptive_out["history_opt_aero_calls"] = history_opt_aero_calls
+    adaptive_out["history_function_evals"] = history_function_evals
+    adaptive_out["history_gradient_evals"] = history_gradient_evals
+    adaptive_out["history_full_opt"] = history_full_opt
+    adaptive_out["center_history"] = center_history
+    adaptive_out["selection_history"] = selection_history
+    adaptive_out["n_scoring_aero_calls_total"] = n_scoring_aero_calls_total
+    adaptive_out["n_optimization_aero_calls_total"] = n_optimization_aero_calls_total
+    adaptive_out["n_function_evals_total"] = n_function_evals_total
+    adaptive_out["n_gradient_evals_total"] = n_gradient_evals_total
+    adaptive_out["n_scoring_evals_total"] = n_scoring_aero_calls_total
+    adaptive_out["n_optimization_evals_total"] = n_optimization_aero_calls_total
+    adaptive_out["n_total_evals"] = n_scoring_aero_calls_total + n_optimization_aero_calls_total
+    if indicator_u == "GRAD":
+        adaptive_out["grad_score_mode"] = grad_score_mode
+    return adaptive_out
