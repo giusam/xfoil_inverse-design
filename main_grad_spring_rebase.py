@@ -1,5 +1,5 @@
+import argparse
 import csv
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -192,6 +192,8 @@ def _evaluate_geometry_state(
     label,
     workdir,
 ):
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
     upper_centers = np.asarray(upper_centers, dtype=float)
     lower_centers = np.asarray(lower_centers, dtype=float)
     a_vec = np.asarray(a_vec, dtype=float)
@@ -213,7 +215,7 @@ def _evaluate_geometry_state(
         power=SETTINGS["optimization"]["hh_power"],
     )
 
-    airfoil_dat = Path(workdir) / f"{label}_airfoil.dat"
+    airfoil_dat = workdir / f"{label}_airfoil.dat"
     write_dat(airfoil_dat, x, yu, yl, name=label.upper())
 
     res = run_aero(
@@ -484,13 +486,50 @@ def _print_final_recap(
     print(f"Total aero calls grad+spring = {int(total_grad_spring_raw)}")
 
 
-def main():
-    if len(sys.argv) > 2:
-        raise SystemExit("Usage: python3 main_grad_spring_rebase.py [case.cfg]")
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run ADAPT_GRAD + final spring rebase experiment.",
+    )
+    parser.add_argument(
+        "cfg_path",
+        nargs="?",
+        help="Optional CFG override file.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="If provided, run only this seed.",
+    )
+    parser.add_argument(
+        "--out",
+        default="grad_spring_rebase",
+        help="Base output directory. Relative paths are resolved from the script directory.",
+    )
+    parser.add_argument(
+        "--clean-output",
+        dest="clean_output",
+        action="store_true",
+        default=True,
+        help="Clean the base output directory before running.",
+    )
+    parser.add_argument(
+        "--no-clean-output",
+        dest="clean_output",
+        action="store_false",
+        help="Do not clean the base output directory before running.",
+    )
+    return parser.parse_args()
 
-    if len(sys.argv) == 2:
-        apply_cfg_overrides(sys.argv[1])
-        print(f"Loaded CFG overrides from: {sys.argv[1]}")
+
+def main():
+    args = _parse_args()
+
+    if args.cfg_path:
+        apply_cfg_overrides(args.cfg_path)
+        print(f"Loaded CFG overrides from: {args.cfg_path}")
+
+    if args.seed is not None:
+        SETTINGS["initial_shape"]["seed_list"] = [int(args.seed)]
 
     restart_mode_cfg = str(
         SETTINGS.get("spring_reallocation", {}).get("restart_mode", "rebase")
@@ -505,8 +544,16 @@ def main():
         print("#############################################")
 
     base_dir = Path(__file__).resolve().parent
-    base_output_dir = base_dir / "grad_spring_rebase"
-    clean_workdir(base_output_dir)
+    out_path = Path(args.out)
+    if out_path.is_absolute():
+        base_output_dir = out_path
+    else:
+        base_output_dir = base_dir / out_path
+
+    if args.clean_output:
+        clean_workdir(base_output_dir)
+    else:
+        base_output_dir.mkdir(parents=True, exist_ok=True)
 
     seed_list = SETTINGS["initial_shape"].get("seed_list")
     if seed_list is None:
