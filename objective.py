@@ -68,6 +68,7 @@ def make_objective(
     current_best_error,
 ):
     eval_counter = {"k": 0}
+    cp_state_counter = {"k": 0}
     eval_history = []
     function_eval_history = []
     gradient_eval_history = []
@@ -416,6 +417,92 @@ def make_objective(
             "polar": polar,
         }
 
+    def evaluate_cp_state(a):
+        cp_state_counter["k"] += 1
+        k = cp_state_counter["k"]
+
+        yu, yl = _build_geometry(a)
+        fail_thickness, min_thickness = _thickness_check(yu, yl)
+
+        if fail_thickness:
+            penalty_value = get_penalty()
+            return {
+                "status": "FAIL_THICKNESS",
+                "cp_candidate": None,
+                "objective_base": penalty_value,
+                "metrics": {},
+                "polar": None,
+                "min_thickness": float(min_thickness),
+            }
+
+        if aero_backend == "cmplxfoil":
+            if not cmplxfoil_template_dat.exists():
+                write_dat(
+                    cmplxfoil_template_dat,
+                    x,
+                    np.real(yu_init),
+                    np.real(yl_init),
+                    name="CMPLXFOIL_TEMPLATE",
+                )
+
+            run_dir = working_dir / f"cp_state_run_{k:05d}"
+
+            _record_aero_call()
+            res = run_cmplxfoil_coords(
+                airfoil_dat=cmplxfoil_template_dat,
+                x=x,
+                yu=yu,
+                yl=yl,
+                alpha_deg=alpha_deg,
+                reynolds=reynolds,
+                xfoil_iter=xfoil_iter,
+                timeout=timeout,
+                working_dir=run_dir,
+                session_key=cmplxfoil_real_session_key,
+            )
+        else:
+            airfoil_dat = working_dir / f"cp_state_{k:05d}.dat"
+            write_dat(airfoil_dat, x, yu, yl, name=f"CP_STATE_{k:05d}")
+
+            run_dir = working_dir / f"cp_state_run_{k:05d}"
+
+            _record_aero_call()
+            res = run_aero(
+                airfoil_dat=airfoil_dat,
+                alpha_deg=alpha_deg,
+                reynolds=reynolds,
+                xfoil_iter=xfoil_iter,
+                timeout=timeout,
+                working_dir=run_dir,
+            )
+
+        if not res["success"] or res.get("polar") is None or res.get("cp_data") is None:
+            penalty_value = get_penalty()
+            return {
+                "status": "FAIL_AERO",
+                "cp_candidate": None,
+                "objective_base": penalty_value,
+                "metrics": {},
+                "polar": None,
+                "min_thickness": float(min_thickness),
+            }
+
+        cp_candidate = split_upper_lower_cp_from_x(
+            res["cp_data"]["x"],
+            res["cp_data"]["cp"],
+        )
+        err = total_cp_error(cp_target, cp_candidate)
+        metrics = compute_metrics(x, yu, yl, res["polar"])
+
+        return {
+            "status": "OK",
+            "cp_candidate": cp_candidate,
+            "objective_base": err,
+            "metrics": metrics,
+            "polar": res["polar"],
+            "min_thickness": float(min_thickness),
+        }
+
     def _evaluate_objective_cs(a):
         state_cs = _evaluate_aero_state_cs(a, enabled_metric_names=[])
         if state_cs is None:
@@ -524,5 +611,7 @@ def make_objective(
     objective.compute_gradient_cs = compute_gradient_cs
     objective.compute_aero_gradients_cs = compute_aero_gradients_cs
     objective.evaluate_cs = _evaluate_objective_cs
+    objective.evaluate_cp_state = evaluate_cp_state
+    objective.cp_state_counter = cp_state_counter
     objective.append_grad_history = _append_grad_history
     return objective

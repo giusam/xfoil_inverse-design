@@ -1,29 +1,47 @@
 from pathlib import Path
 import shutil
+import argparse
 
-import numpy as np
 
-import sys
-from settings import SETTINGS, apply_cfg_overrides
-from geometry import build_naca0012_surfaces, build_random_initial_geometry, write_dat
-from xfoil_wrapper import clean_workdir, run_xfoil
-from cmplxfoil_wrapper import run_cmplxfoil, clear_cmplxfoil_solver_cache
-from aero_wrapper import run_aero
-from cp_utils import split_upper_lower_cp_from_x
-from objective import total_cp_error
-from optimization import optimize_for_centers
-from cleanup import cleanup_debug_files
-from adaptive_utils import build_hh_centers, split_total_across_sides
-from adaptive_strategy import run_adaptive_strategy
-from reporting import (
-    make_seed_result,
-    print_aggregate_summary,
-    print_initial_state,
-    print_seed_recap,
-    report_initial_aero_failure,
-    save_seed_outputs,
-    write_global_summary,
-)
+def _load_runtime_imports():
+    global np
+    global SETTINGS, apply_cfg_overrides
+    global build_naca0012_surfaces, build_random_initial_geometry, write_dat
+    global clean_workdir, run_xfoil
+    global run_cmplxfoil, clear_cmplxfoil_solver_cache
+    global run_aero
+    global split_upper_lower_cp_from_x
+    global total_cp_error
+    global optimize_for_centers
+    global cleanup_debug_files
+    global build_hh_centers, split_total_across_sides
+    global run_adaptive_strategy
+    global make_seed_result, print_aggregate_summary, print_initial_state
+    global print_seed_recap, report_initial_aero_failure, save_seed_outputs
+    global write_global_summary
+
+    import numpy as np
+
+    from settings import SETTINGS, apply_cfg_overrides
+    from geometry import build_naca0012_surfaces, build_random_initial_geometry, write_dat
+    from xfoil_wrapper import clean_workdir, run_xfoil
+    from cmplxfoil_wrapper import run_cmplxfoil, clear_cmplxfoil_solver_cache
+    from aero_wrapper import run_aero
+    from cp_utils import split_upper_lower_cp_from_x
+    from objective import total_cp_error
+    from optimization import optimize_for_centers
+    from cleanup import cleanup_debug_files
+    from adaptive_utils import build_hh_centers, split_total_across_sides
+    from adaptive_strategy import run_adaptive_strategy
+    from reporting import (
+        make_seed_result,
+        print_aggregate_summary,
+        print_initial_state,
+        print_seed_recap,
+        report_initial_aero_failure,
+        save_seed_outputs,
+        write_global_summary,
+    )
 
 
 def _static_placeholder(err_init, init_res):
@@ -99,35 +117,83 @@ def run_target_aero(*args, **kwargs):
 
     raise ValueError(f"Unknown target backend: {target_backend}")
 
-def main():
-    if len(sys.argv) > 2:
-        raise SystemExit("Usage: python main_inverse_static.py [case.cfg]")
 
-    if len(sys.argv) == 2:
-        apply_cfg_overrides(sys.argv[1])
-        print(f"Loaded CFG overrides from: {sys.argv[1]}")
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run static and/or adaptive inverse airfoil optimization.",
+    )
+    parser.add_argument(
+        "cfg_path",
+        nargs="?",
+        help="Optional case.cfg path with settings overrides.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Run a single initial-shape seed.",
+    )
+    parser.add_argument(
+        "--out",
+        default="run_debug",
+        help="Base output directory. Relative paths are resolved from the script directory.",
+    )
+    parser.add_argument(
+        "--clean-output",
+        dest="clean_output",
+        action="store_true",
+        default=True,
+        help="Remove the base output directory before running. This is the default.",
+    )
+    parser.add_argument(
+        "--no-clean-output",
+        dest="clean_output",
+        action="store_false",
+        help="Create the base output directory if needed without deleting existing contents.",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = _parse_args()
+    _load_runtime_imports()
+
+    if args.cfg_path is not None:
+        apply_cfg_overrides(args.cfg_path)
+        print(f"Loaded CFG overrides from: {args.cfg_path}")
+
+    if args.seed is not None:
+        SETTINGS["initial_shape"]["seed_list"] = [int(args.seed)]
 
     base_dir = Path(__file__).resolve().parent
 
+    out_path = Path(args.out)
+    if out_path.is_absolute():
+        base_workdir = out_path
+    else:
+        base_workdir = base_dir / out_path
+
+    if args.clean_output:
+        if base_workdir.exists():
+            shutil.rmtree(base_workdir)
+        base_workdir.mkdir(parents=True, exist_ok=True)
+    else:
+        base_workdir.mkdir(parents=True, exist_ok=True)
+
     for pattern in ("a_history_seed_*.dat", "grad_history_seed_*.dat"):
-        for p in base_dir.glob(pattern):
+        for p in base_workdir.glob(pattern):
             try:
                 p.unlink()
             except OSError:
                 pass
 
     results = []
-    base_workdir = base_dir / "run_debug"
 
     snapshots_enabled = bool(SETTINGS.get("snapshots", {}).get("enabled", False))
-    snap_root = base_dir / SETTINGS.get("snapshots", {}).get("dir_name", "snap")
+    snap_root = base_workdir / SETTINGS.get("snapshots", {}).get("dir_name", "snapshots")
 
     if snapshots_enabled:
         snap_root.mkdir(parents=True, exist_ok=True)
-
-    if base_workdir.exists():
-        shutil.rmtree(base_workdir)
-    base_workdir.mkdir(parents=True, exist_ok=True)
 
     seed_list = SETTINGS["initial_shape"].get("seed_list", None)
     if seed_list is None:

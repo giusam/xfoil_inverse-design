@@ -119,6 +119,14 @@ SETTINGS = {
             "xmax": 0.95,
             "interval_sampling_mode": "midpoint",
             "interval_sampling_fractions": [0.25, 0.5, 0.75],
+            "grad_score_mode": "grad_norm",
+            "grad_novelty_eps": 0.10,
+            "grad_novelty_power": 2.0,
+            "grad_novelty_rcond": 1.0e-10,
+            "write_candidate_score_csv": True,
+            "gn_schur_reg": 1.0e-10,
+            "gn_schur_rcond": 1.0e-10,
+            "gn_schur_fd_target_peak_normal": None,
         },
     },
 
@@ -232,6 +240,14 @@ _CFG_KEY_MAP = {
     "ADAPT_XMAX": ("optimization", "adaptive", "xmax"),
     "ADAPT_INTERVAL_SAMPLING_MODE": ("optimization", "adaptive", "interval_sampling_mode"),
     "ADAPT_INTERVAL_SAMPLING_FRACTIONS": ("optimization", "adaptive", "interval_sampling_fractions"),
+    "ADAPT_GRAD_SCORE_MODE": ("optimization", "adaptive", "grad_score_mode"),
+    "ADAPT_GRAD_NOVELTY_EPS": ("optimization", "adaptive", "grad_novelty_eps"),
+    "ADAPT_GRAD_NOVELTY_POWER": ("optimization", "adaptive", "grad_novelty_power"),
+    "ADAPT_GRAD_NOVELTY_RCOND": ("optimization", "adaptive", "grad_novelty_rcond"),
+    "ADAPT_WRITE_CANDIDATE_SCORE_CSV": ("optimization", "adaptive", "write_candidate_score_csv"),
+    "ADAPT_GN_SCHUR_REG": ("optimization", "adaptive", "gn_schur_reg"),
+    "ADAPT_GN_SCHUR_RCOND": ("optimization", "adaptive", "gn_schur_rcond"),
+    "ADAPT_GN_SCHUR_FD_TARGET_PEAK_NORMAL": ("optimization", "adaptive", "gn_schur_fd_target_peak_normal"),
 
     # ---------------------------
     # spring_reallocation

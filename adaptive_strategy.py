@@ -1,5 +1,6 @@
 from pathlib import Path
 import shutil
+import csv
 import numpy as np
 
 from settings import SETTINGS
@@ -10,7 +11,7 @@ from adaptive_utils import (
     lift_a_to_new_side_centers,
     _compute_adaptive_nadd,
 )
-from adaptive_scoring import score_candidate
+from adaptive_scoring import prepare_gn_schur_level_context, score_candidate
 from adaptive_pred import _prepare_pred_level_context
 import gc
 from cmplxfoil_wrapper import clear_cmplxfoil_solver_cache
@@ -83,6 +84,7 @@ def _print_candidate_diagnostics(scored, topk=12):
             f"frac={fraction_str:<4s}  "
             f"x={item['x']:.6f}  "
             f"score={item['score']:.6e}  "
+            f"score_mode={item.get('score_mode', item.get('mode', '-'))}  "
             f"component={item['component']:.6e}  "
             f"raw={item['raw_grad']:.6e}  "
             f"mode={item['mode']}  "
@@ -164,6 +166,98 @@ def _format_selected_candidate_summary(indicator, candidate):
         f"center={float(candidate['x']):.6f} "
         f"score={float(candidate['score']):.6e}"
     )
+
+
+def _write_candidate_score_csv(workdir, level, ndv_current, scored_candidates):
+    if len(scored_candidates) == 0:
+        return None
+
+    out_path = Path(workdir) / f"candidate_scores_level_{int(level):03d}.csv"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    persistent_path = (
+        Path(workdir).parent
+        / "summary"
+        / "candidate_scores"
+        / Path(workdir).name
+        / out_path.name
+    )
+    persistent_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "level",
+        "ndv_current",
+        "ndv_candidate",
+        "side",
+        "center",
+        "interval_left",
+        "interval_right",
+        "fraction",
+        "score_mode",
+        "score",
+        "g_norm",
+        "g_new",
+        "abs_g_new",
+        "novelty_distance",
+        "novelty_factor",
+        "max_corr_geo",
+        "norm_phi",
+        "projection_residual_norm",
+        "projection_rank",
+        "gn_g_perp",
+        "gn_q_schur",
+        "gn_alpha_unclipped",
+        "gn_alpha_clipped",
+        "gn_norm_jc",
+        "gn_norm_z",
+        "gn_rank_A",
+        "gn_fd_mode",
+        "gn_fd_h",
+        "gn_n_fail_candidate",
+    ]
+
+    rows = []
+    for item in scored_candidates:
+        rows.append(
+            {
+                "level": int(level),
+                "ndv_current": int(ndv_current),
+                "ndv_candidate": int(ndv_current) + 1,
+                "side": item.get("side", ""),
+                "center": float(item.get("x", np.nan)),
+                "interval_left": float(item.get("x_left", np.nan)),
+                "interval_right": float(item.get("x_right", np.nan)),
+                "fraction": float(item.get("local_fraction", np.nan)),
+                "score_mode": item.get("score_mode", ""),
+                "score": float(item.get("score", np.nan)),
+                "g_norm": float(item.get("g_norm", np.nan)),
+                "g_new": float(item.get("g_new", np.nan)),
+                "abs_g_new": float(item.get("abs_g_new", np.nan)),
+                "novelty_distance": float(item.get("novelty_distance", np.nan)),
+                "novelty_factor": float(item.get("novelty_factor", np.nan)),
+                "max_corr_geo": float(item.get("max_corr_geo", np.nan)),
+                "norm_phi": float(item.get("norm_phi", np.nan)),
+                "projection_residual_norm": float(item.get("projection_residual_norm", np.nan)),
+                "projection_rank": int(item.get("projection_rank", 0)),
+                "gn_g_perp": float(item.get("gn_g_perp", np.nan)),
+                "gn_q_schur": float(item.get("gn_q_schur", np.nan)),
+                "gn_alpha_unclipped": float(item.get("gn_alpha_unclipped", np.nan)),
+                "gn_alpha_clipped": float(item.get("gn_alpha_clipped", np.nan)),
+                "gn_norm_jc": float(item.get("gn_norm_jc", np.nan)),
+                "gn_norm_z": float(item.get("gn_norm_z", np.nan)),
+                "gn_rank_A": item.get("gn_rank_A", np.nan),
+                "gn_fd_mode": item.get("gn_fd_mode", ""),
+                "gn_fd_h": float(item.get("gn_fd_h", np.nan)),
+                "gn_n_fail_candidate": item.get("gn_n_fail_candidate", np.nan),
+            }
+        )
+
+    for path in (out_path, persistent_path):
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    return out_path, persistent_path
 
 
 def _score_candidate_oracle(
@@ -259,6 +353,16 @@ def run_adaptive_strategy(
     indicator,
 ):
     opt_ad = SETTINGS["optimization"]["adaptive"]
+    indicator_u = str(indicator).upper()
+    grad_score_mode = str(opt_ad.get("grad_score_mode", "grad_norm")).strip().lower()
+    if indicator_u == "GRAD":
+        allowed_grad_score_modes = {"grad_norm", "grad_new", "grad_orth", "gn_schur"}
+        if grad_score_mode not in allowed_grad_score_modes:
+            raise ValueError(
+                f"Unknown ADAPT_GRAD_SCORE_MODE={grad_score_mode!r}; "
+                f"expected one of {sorted(allowed_grad_score_modes)}"
+            )
+        print(f"ADAPT_GRAD score mode = {grad_score_mode}")
 
     snapshots_cfg = SETTINGS.get("snapshots", {})
     if bool(snapshots_cfg.get("enabled", False)):
@@ -384,7 +488,7 @@ def run_adaptive_strategy(
             break
 
         pred_context = None
-        if str(indicator).upper() == "PRED":
+        if indicator_u == "PRED":
             pred_context = _prepare_pred_level_context(
                 x=x,
                 yu_init=yu_init,
@@ -399,10 +503,32 @@ def run_adaptive_strategy(
             n_scoring_aero_calls_total += int(pred_context.get("n_scoring_aero_calls", 0))
 
         current_ndv = len(upper_centers) + len(lower_centers)
+        gn_context = None
+        if indicator_u == "GRAD" and grad_score_mode == "gn_schur":
+            gn_context = prepare_gn_schur_level_context(
+                x=x,
+                yu_init=yu_init,
+                yl_init=yl_init,
+                cp_target=cp_target,
+                active_upper=upper_centers,
+                active_lower=lower_centers,
+                active_a=np.asarray(adaptive_out["a_opt"], dtype=float),
+                current_best_error=current_best_error,
+                workdir=Path(workdir) / "adaptive_candidate_scoring",
+            )
+            n_scoring_aero_calls_total += int(gn_context.get("n_scoring_aero_calls", 0))
+            print(
+                "GN-SCHUR level context: "
+                f"base_status={gn_context.get('base_status')}  "
+                f"rank_A={gn_context.get('rank_A')}  "
+                f"score_aero_calls={int(gn_context.get('n_scoring_aero_calls', 0))}  "
+                f"active_fd_fail={gn_context.get('fd_diag_active', {}).get('n_fail_dirs', 0)}"
+            )
+
         scored_local = []
 
         for cand in candidates:
-            if str(indicator).upper() == "ORACLE":
+            if indicator_u == "ORACLE":
                 info = _score_candidate_oracle(
                     x=x,
                     yu_init=yu_init,
@@ -430,6 +556,7 @@ def run_adaptive_strategy(
                     workdir=Path(workdir) / "adaptive_candidate_scoring",
                     indicator=indicator,
                     pred_context=pred_context,
+                    gn_context=gn_context,
                 )
 
             n_scoring_aero_calls_total += int(info["n_scoring_aero_calls"])
@@ -449,8 +576,39 @@ def run_adaptive_strategy(
                     "active_names": list(info["active_names"]),
                     "lambda": np.array(info["lambda"], copy=True),
                     "mode": info["mode"],
+                    "score_mode": info.get("score_mode", ""),
+                    "g_norm": info.get("g_norm", np.nan),
+                    "g_new": info.get("g_new", info.get("raw_grad", np.nan)),
+                    "abs_g_new": info.get("abs_g_new", abs(float(info.get("raw_grad", np.nan))) if np.isfinite(info.get("raw_grad", np.nan)) else np.nan),
+                    "novelty_distance": info.get("novelty_distance", np.nan),
+                    "novelty_factor": info.get("novelty_factor", np.nan),
+                    "max_corr_geo": info.get("max_corr_geo", np.nan),
+                    "norm_phi": info.get("norm_phi", np.nan),
+                    "projection_residual_norm": info.get("projection_residual_norm", np.nan),
+                    "projection_rank": info.get("projection_rank", 0),
+                    "gn_g_perp": info.get("gn_g_perp", np.nan),
+                    "gn_q_schur": info.get("gn_q_schur", np.nan),
+                    "gn_alpha_unclipped": info.get("gn_alpha_unclipped", np.nan),
+                    "gn_alpha_clipped": info.get("gn_alpha_clipped", np.nan),
+                    "gn_norm_jc": info.get("gn_norm_jc", np.nan),
+                    "gn_norm_z": info.get("gn_norm_z", np.nan),
+                    "gn_rank_A": info.get("gn_rank_A", np.nan),
+                    "gn_fd_mode": info.get("gn_fd_mode", ""),
+                    "gn_fd_h": info.get("gn_fd_h", np.nan),
+                    "gn_n_fail_candidate": info.get("gn_n_fail_candidate", np.nan),
                 }
             )
+
+        if indicator_u == "GRAD" and bool(opt_ad.get("write_candidate_score_csv", True)):
+            csv_path = _write_candidate_score_csv(
+                workdir=workdir,
+                level=current_ndv,
+                ndv_current=current_ndv,
+                scored_candidates=scored_local,
+            )
+            if csv_path is not None:
+                print(f"Candidate score CSV written: {csv_path[0]}")
+                print(f"Persistent candidate score CSV written: {csv_path[1]}")
 
         scored = reduce_to_best_candidate_per_interval(scored_local)
         scored.sort(key=lambda item: (-item["score"], item["x"]))
@@ -638,5 +796,7 @@ def run_adaptive_strategy(
     adaptive_out["best_upper_centers"] = best_adaptive["upper_centers"]
     adaptive_out["best_lower_centers"] = best_adaptive["lower_centers"]
     adaptive_out["best_label"] = best_adaptive["label"]
+    if indicator_u == "GRAD":
+        adaptive_out["grad_score_mode"] = grad_score_mode
 
     return adaptive_out
