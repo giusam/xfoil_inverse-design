@@ -1,4 +1,3 @@
-import csv
 import sys
 from pathlib import Path
 
@@ -6,121 +5,31 @@ import numpy as np
 
 from settings import SETTINGS, apply_cfg_overrides
 from geometry import (
-    apply_hicks_henne_deformation,
     build_naca0012_surfaces,
     build_random_initial_geometry,
     write_dat,
 )
-from xfoil_wrapper import clean_workdir, run_xfoil
-from cmplxfoil_wrapper import run_cmplxfoil, clear_cmplxfoil_solver_cache
+from xfoil_wrapper import clean_workdir
+from cmplxfoil_wrapper import clear_cmplxfoil_solver_cache
 from aero_wrapper import run_aero
 from cp_utils import split_upper_lower_cp_from_x
 from objective import total_cp_error
 from optimization import optimize_for_centers
 from adaptive_utils import build_hh_centers, split_total_across_sides
-from reporting import print_initial_state, report_initial_aero_failure
-from spring_reallocation import (
-    reallocate_airfoil_centers,
-    split_a_by_sides,
+from experiment_utils import (
+    evaluate_geometry_state,
+    format_array,
+    run_target_aero,
+    write_csv,
 )
-
-
-def run_target_aero(*args, **kwargs):
-    target_backend = SETTINGS.get("aero", {}).get(
-        "target_backend",
-        SETTINGS.get("aero", {}).get("backend", "xfoil"),
-    )
-    target_backend = str(target_backend).strip().lower()
-
-    if target_backend == "cmplxfoil":
-        return run_cmplxfoil(*args, **kwargs)
-    if target_backend == "xfoil":
-        return run_xfoil(*args, **kwargs)
-
-    raise ValueError(f"Unknown target backend: {target_backend}")
-
-
-def _format_array(arr):
-    return np.array2string(np.asarray(arr, dtype=float), precision=6, separator=", ")
+from reporting import print_initial_state, report_initial_aero_failure
+from spring_reallocation import reallocate_airfoil_centers
 
 
 def _start_metric_label(restart_mode):
     if str(restart_mode).strip().lower() == "rebase":
         return "Spring rebase start Cp error"
     return "Spring projected Cp error"
-
-
-def _write_csv(path, fieldnames, rows):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-
-
-def _evaluate_geometry_state(
-    x,
-    yu_init,
-    yl_init,
-    cp_target,
-    upper_centers,
-    lower_centers,
-    a_vec,
-    label,
-    workdir,
-):
-    upper_centers = np.asarray(upper_centers, dtype=float)
-    lower_centers = np.asarray(lower_centers, dtype=float)
-    a_vec = np.asarray(a_vec, dtype=float)
-
-    a_upper, a_lower = split_a_by_sides(a_vec, len(upper_centers), len(lower_centers))
-    yu, yl = apply_hicks_henne_deformation(
-        x=x,
-        yu_base=yu_init,
-        yl_base=yl_init,
-        a_upper=a_upper,
-        a_lower=a_lower,
-        upper_centers=upper_centers,
-        lower_centers=lower_centers,
-        power=SETTINGS["optimization"]["hh_power"],
-    )
-
-    airfoil_dat = Path(workdir) / f"{label}_airfoil.dat"
-    write_dat(airfoil_dat, x, yu, yl, name=label.upper())
-
-    res = run_aero(
-        airfoil_dat=airfoil_dat,
-        alpha_deg=SETTINGS["xfoil"]["alpha"],
-        reynolds=SETTINGS["xfoil"]["Re"],
-        xfoil_iter=SETTINGS["xfoil"]["xfoil_iter"],
-        timeout=SETTINGS["xfoil"]["timeout"],
-        working_dir=Path(workdir) / f"{label}_run",
-    )
-    if not res["success"]:
-        return {
-            "success": False,
-            "res": res,
-            "yu": yu,
-            "yl": yl,
-            "cp_opt": None,
-            "err": float("nan"),
-        }
-
-    cp_candidate = split_upper_lower_cp_from_x(
-        res["cp_data"]["x"],
-        res["cp_data"]["cp"],
-    )
-    err = total_cp_error(cp_target, cp_candidate)
-    return {
-        "success": True,
-        "res": res,
-        "yu": yu,
-        "yl": yl,
-        "cp_opt": cp_candidate,
-        "err": float(err),
-    }
 
 
 def _maybe_make_plots(cycle_dir, centers_rows, objective_rows):
@@ -197,7 +106,7 @@ def _write_cycle_outputs(cycle_dir, diagnostics, projected_eval, reopt_out, stat
                 }
             )
 
-    _write_csv(
+    write_csv(
         cycle_dir / "centers_before_after.csv",
         ["side", "index", "old_center", "new_center", "dx", "importance"],
         centers_rows,
@@ -220,7 +129,7 @@ def _write_cycle_outputs(cycle_dir, diagnostics, projected_eval, reopt_out, stat
             }
         )
 
-    _write_csv(
+    write_csv(
         cycle_dir / "spring_diagnostics.csv",
         [
             "side",
@@ -265,9 +174,9 @@ def _print_cycle_recap(cycle_idx, diagnostics, projected_eval, restart_mode, cur
         spring_diag = diagnostics[f"{side_key}_spring"]
         proj_diag = diagnostics[f"{side_key}_projection"]
 
-        print(f"{side_name} old centers = {_format_array(spring_diag['old_centers'])}")
-        print(f"{side_name} new centers = {_format_array(spring_diag['new_centers'])}")
-        print(f"{side_name} dx          = {_format_array(spring_diag['displacement'])}")
+        print(f"{side_name} old centers = {format_array(spring_diag['old_centers'])}")
+        print(f"{side_name} new centers = {format_array(spring_diag['new_centers'])}")
+        print(f"{side_name} dx          = {format_array(spring_diag['displacement'])}")
         print(
             f"{side_name} projection L2/Linf/rel = "
             f"{proj_diag['projection_error_l2']:.6e} / "
@@ -400,10 +309,10 @@ def _print_final_recap(
         f"{final_out['n_optimization_aero_calls_total']}"
     )
     print("")
-    print(f"Old centers upper = {_format_array(diagnostics['upper_spring']['old_centers'])}")
-    print(f"New centers upper = {_format_array(diagnostics['upper_spring']['new_centers'])}")
-    print(f"Old centers lower = {_format_array(diagnostics['lower_spring']['old_centers'])}")
-    print(f"New centers lower = {_format_array(diagnostics['lower_spring']['new_centers'])}")
+    print(f"Old centers upper = {format_array(diagnostics['upper_spring']['old_centers'])}")
+    print(f"New centers upper = {format_array(diagnostics['upper_spring']['new_centers'])}")
+    print(f"Old centers lower = {format_array(diagnostics['lower_spring']['old_centers'])}")
+    print(f"New centers lower = {format_array(diagnostics['lower_spring']['new_centers'])}")
 
 
 def _get_seeds_to_run():
@@ -586,7 +495,7 @@ def main():
                 reopt_label = f"spring_rebase_reopt_cycle_{cycle_idx:02d}"
                 second_current_best_error = float(current_out["err_opt"])
 
-            last_projected_eval = _evaluate_geometry_state(
+            last_projected_eval = evaluate_geometry_state(
                 x=x,
                 yu_init=second_yu_init,
                 yl_init=second_yl_init,
@@ -651,7 +560,7 @@ def main():
         )
         summary_rows.append(summary_row)
 
-        _write_csv(
+        write_csv(
             seed_dir / "summary.csv",
             [
                 "seed",
@@ -686,7 +595,7 @@ def main():
         clear_cmplxfoil_solver_cache()
 
     if len(summary_rows) > 0:
-        _write_csv(
+        write_csv(
             base_output_dir / "summary_all.csv",
             [
                 "seed",

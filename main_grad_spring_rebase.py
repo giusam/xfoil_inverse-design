@@ -1,24 +1,31 @@
 import argparse
-import csv
 from pathlib import Path
 
 import numpy as np
 
 from settings import SETTINGS, apply_cfg_overrides
 from geometry import (
-    apply_hicks_henne_deformation,
     build_naca0012_surfaces,
     build_random_initial_geometry,
     write_dat,
 )
 from aero_wrapper import run_aero
-from xfoil_wrapper import run_xfoil, clean_workdir
-from cmplxfoil_wrapper import run_cmplxfoil, clear_cmplxfoil_solver_cache
+from xfoil_wrapper import clean_workdir
+from cmplxfoil_wrapper import clear_cmplxfoil_solver_cache
 from cp_utils import split_upper_lower_cp_from_x
 from objective import total_cp_error
 from optimization import optimize_for_centers
-from spring_reallocation import reallocate_airfoil_centers, split_a_by_sides
+from spring_reallocation import reallocate_airfoil_centers
 from adaptive_strategy import run_adaptive_strategy
+from experiment_utils import (
+    evaluate_geometry_state,
+    format_array,
+    polar_metric,
+    run_target_aero,
+    safe_float,
+    save_out_bundle,
+    write_csv,
+)
 from reporting import print_initial_state, report_initial_aero_failure
 
 
@@ -68,191 +75,6 @@ SUMMARY_FIELDS = [
 ]
 
 
-def run_target_aero(*args, **kwargs):
-    target_backend = SETTINGS.get(
-        "aero",
-        {},
-    ).get(
-        "target_backend",
-        SETTINGS.get("aero", {}).get("backend", "xfoil"),
-    )
-    target_backend = str(target_backend).strip().lower()
-
-    if target_backend == "cmplxfoil":
-        return run_cmplxfoil(*args, **kwargs)
-    if target_backend == "xfoil":
-        return run_xfoil(*args, **kwargs)
-
-    raise ValueError(f"Unknown target backend: {target_backend}")
-
-
-def _write_csv(path, fieldnames, rows):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-
-
-def _format_array(arr):
-    return np.array2string(np.asarray(arr, dtype=float), precision=6, separator=", ")
-
-
-def _safe_float(value):
-    if value is None:
-        return float("nan")
-    try:
-        return float(np.real(value))
-    except Exception:
-        return float("nan")
-
-
-def _polar_metric(out, name):
-    if out is None:
-        return float("nan")
-    opt_res = out.get("opt_res")
-    if opt_res is None:
-        return float("nan")
-    polar = opt_res.get("polar")
-    if polar is None:
-        return float("nan")
-    return _safe_float(polar.get(name))
-
-
-def _write_polar_from_res(res, dst_path):
-    if res is None or res.get("polar") is None:
-        return
-
-    polar = res["polar"]
-    alpha = _safe_float(polar.get("alpha"))
-    cl = _safe_float(polar.get("CL"))
-    cd = _safe_float(polar.get("CD"))
-    cm = _safe_float(polar.get("CM"))
-
-    with open(dst_path, "w", encoding="utf-8") as f:
-        f.write("alpha CL CD CM\n")
-        f.write(f"{alpha:.10e} {cl:.10e} {cd:.10e} {cm:.10e}\n")
-
-
-def _write_cp_from_res(res, dst_path):
-    if res is None or res.get("cp_data") is None:
-        return
-
-    cp_x = np.asarray(res["cp_data"]["x"], dtype=float)
-    cp_v = np.real(np.asarray(res["cp_data"]["cp"]))
-    data = np.column_stack([cp_x, cp_v])
-    np.savetxt(dst_path, data, header="x cp", comments="")
-
-
-def _save_out_bundle(bundle_dir, x, out, name):
-    bundle_dir = Path(bundle_dir)
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-
-    if out is None:
-        return
-
-    if "yu_opt" in out and "yl_opt" in out:
-        write_dat(
-            bundle_dir / "optimized_airfoil.dat",
-            x,
-            out["yu_opt"],
-            out["yl_opt"],
-            name=name,
-        )
-
-    opt_res = out.get("opt_res")
-    if opt_res is not None:
-        _write_polar_from_res(opt_res, bundle_dir / "polar.txt")
-        _write_cp_from_res(opt_res, bundle_dir / "cp.txt")
-
-    with open(bundle_dir / "summary.txt", "w", encoding="utf-8") as f:
-        f.write(f"name = {name}\n")
-        f.write(f"err_opt = {_safe_float(out.get('err_opt')):.10e}\n")
-        f.write(f"CL = {_polar_metric(out, 'CL'):.10e}\n")
-        f.write(f"CD = {_polar_metric(out, 'CD'):.10e}\n")
-        f.write(f"CM = {_polar_metric(out, 'CM'):.10e}\n")
-        if "upper_centers" in out:
-            f.write(f"upper_centers = {_format_array(out['upper_centers'])}\n")
-        if "lower_centers" in out:
-            f.write(f"lower_centers = {_format_array(out['lower_centers'])}\n")
-        if "a_opt" in out:
-            f.write(f"a_opt = {_format_array(out['a_opt'])}\n")
-
-
-def _evaluate_geometry_state(
-    x,
-    yu_init,
-    yl_init,
-    cp_target,
-    upper_centers,
-    lower_centers,
-    a_vec,
-    label,
-    workdir,
-):
-    workdir = Path(workdir)
-    workdir.mkdir(parents=True, exist_ok=True)
-    upper_centers = np.asarray(upper_centers, dtype=float)
-    lower_centers = np.asarray(lower_centers, dtype=float)
-    a_vec = np.asarray(a_vec, dtype=float)
-
-    a_upper, a_lower = split_a_by_sides(
-        a_vec,
-        len(upper_centers),
-        len(lower_centers),
-    )
-
-    yu, yl = apply_hicks_henne_deformation(
-        x=x,
-        yu_base=yu_init,
-        yl_base=yl_init,
-        a_upper=a_upper,
-        a_lower=a_lower,
-        upper_centers=upper_centers,
-        lower_centers=lower_centers,
-        power=SETTINGS["optimization"]["hh_power"],
-    )
-
-    airfoil_dat = workdir / f"{label}_airfoil.dat"
-    write_dat(airfoil_dat, x, yu, yl, name=label.upper())
-
-    res = run_aero(
-        airfoil_dat=airfoil_dat,
-        alpha_deg=SETTINGS["xfoil"]["alpha"],
-        reynolds=SETTINGS["xfoil"]["Re"],
-        xfoil_iter=SETTINGS["xfoil"]["xfoil_iter"],
-        timeout=SETTINGS["xfoil"]["timeout"],
-        working_dir=Path(workdir) / f"{label}_run",
-    )
-    if not res["success"]:
-        return {
-            "success": False,
-            "res": res,
-            "yu": yu,
-            "yl": yl,
-            "cp_opt": None,
-            "err": float("nan"),
-            "aero_calls": 1,
-        }
-
-    cp_candidate = split_upper_lower_cp_from_x(
-        res["cp_data"]["x"],
-        res["cp_data"]["cp"],
-    )
-    err = total_cp_error(cp_target, cp_candidate)
-    return {
-        "success": True,
-        "res": res,
-        "yu": yu,
-        "yl": yl,
-        "cp_opt": cp_candidate,
-        "err": float(err),
-        "aero_calls": 1,
-    }
-
-
 def _write_centers_csv(path, diagnostics):
     rows = []
     for side_key, side_name, imp_key in (
@@ -276,7 +98,7 @@ def _write_centers_csv(path, diagnostics):
                 }
             )
 
-    _write_csv(
+    write_csv(
         path,
         ["side", "index", "old_center", "new_center", "dx", "importance"],
         rows,
@@ -301,7 +123,7 @@ def _write_diagnostics_csv(path, diagnostics):
             }
         )
 
-    _write_csv(
+    write_csv(
         path,
         [
             "side",
@@ -355,21 +177,21 @@ def _build_summary_row(
         "spring_min_spacing": float(SETTINGS["spring_reallocation"]["min_spacing"]),
         "J_initial": float(err_init),
         "J_grad": grad_err,
-        "J_grad_spring_start": _safe_float(grad_spring_start_err),
+        "J_grad_spring_start": safe_float(grad_spring_start_err),
         "J_grad_spring_raw": raw_err,
         "J_grad_spring_final": final_err,
         "spring_accepted": bool(accepted),
         "relative_improvement_raw_vs_grad": rel_raw,
         "relative_improvement_final_vs_grad": rel_final,
-        "CL_grad": _polar_metric(grad_out, "CL"),
-        "CD_grad": _polar_metric(grad_out, "CD"),
-        "CM_grad": _polar_metric(grad_out, "CM"),
-        "CL_grad_spring_raw": _polar_metric(grad_spring_raw_out, "CL"),
-        "CD_grad_spring_raw": _polar_metric(grad_spring_raw_out, "CD"),
-        "CM_grad_spring_raw": _polar_metric(grad_spring_raw_out, "CM"),
-        "CL_final": _polar_metric(final_out, "CL"),
-        "CD_final": _polar_metric(final_out, "CD"),
-        "CM_final": _polar_metric(final_out, "CM"),
+        "CL_grad": polar_metric(grad_out, "CL"),
+        "CD_grad": polar_metric(grad_out, "CD"),
+        "CM_grad": polar_metric(grad_out, "CM"),
+        "CL_grad_spring_raw": polar_metric(grad_spring_raw_out, "CL"),
+        "CD_grad_spring_raw": polar_metric(grad_spring_raw_out, "CD"),
+        "CM_grad_spring_raw": polar_metric(grad_spring_raw_out, "CM"),
+        "CL_final": polar_metric(final_out, "CL"),
+        "CD_final": polar_metric(final_out, "CD"),
+        "CM_final": polar_metric(final_out, "CM"),
         "grad_scoring_aero_calls": int(grad_out["n_scoring_aero_calls_total"]),
         "grad_optimization_aero_calls": int(grad_out["n_optimization_aero_calls_total"]),
         "grad_function_evals": int(grad_out["n_function_evals_total"]),
@@ -398,18 +220,18 @@ def _build_summary_row(
         "projection_rel_l2_lower": float(
             diagnostics["lower_projection"]["relative_projection_error_l2"]
         ),
-        "old_upper_centers": _format_array(grad_out["upper_centers"]),
-        "new_upper_centers": _format_array(diagnostics["upper_spring"]["new_centers"]),
-        "old_lower_centers": _format_array(grad_out["lower_centers"]),
-        "new_lower_centers": _format_array(diagnostics["lower_spring"]["new_centers"]),
+        "old_upper_centers": format_array(grad_out["upper_centers"]),
+        "new_upper_centers": format_array(diagnostics["upper_spring"]["new_centers"]),
+        "old_lower_centers": format_array(grad_out["lower_centers"]),
+        "new_lower_centers": format_array(diagnostics["lower_spring"]["new_centers"]),
     }
 
 
 def _print_rebase_check(j_grad, start_eval):
     print("Rebase start should match ADAPT_GRAD final geometry.")
     print(f"J_grad = {float(j_grad):.6e}")
-    print(f"J_start = {_safe_float(start_eval.get('err')):.6e}")
-    diff = _safe_float(start_eval.get("err")) - float(j_grad)
+    print(f"J_start = {safe_float(start_eval.get('err')):.6e}")
+    diff = safe_float(start_eval.get("err")) - float(j_grad)
     print(f"Difference = {diff:.6e}")
 
     rel = abs(diff) / max(abs(float(j_grad)), 1.0e-16)
@@ -442,7 +264,7 @@ def _print_final_recap(
     print(f"seed = {seed}")
     print(f"Initial Cp error = {float(err_init):.6e}")
     print(f"ADAPT_GRAD Cp error = {float(grad_out['err_opt']):.6e}")
-    print(f"GRAD+spring rebase start Cp error = {_safe_float(start_eval.get('err')):.6e}")
+    print(f"GRAD+spring rebase start Cp error = {safe_float(start_eval.get('err')):.6e}")
     print(f"GRAD+spring raw Cp error = {raw_err:.6e}")
     print(f"GRAD+spring final Cp error = {float(final_out['err_opt']):.6e}")
     print(f"Spring accepted = {'YES' if accepted else 'NO'}")
@@ -452,26 +274,26 @@ def _print_final_recap(
         f"{float(diagnostics['upper_projection']['relative_projection_error_l2']):.6e} / "
         f"{float(diagnostics['lower_projection']['relative_projection_error_l2']):.6e}"
     )
-    print(f"Old/new centers upper = {_format_array(grad_out['upper_centers'])} -> {_format_array(diagnostics['upper_spring']['new_centers'])}")
-    print(f"Old/new centers lower = {_format_array(grad_out['lower_centers'])} -> {_format_array(diagnostics['lower_spring']['new_centers'])}")
+    print(f"Old/new centers upper = {format_array(grad_out['upper_centers'])} -> {format_array(diagnostics['upper_spring']['new_centers'])}")
+    print(f"Old/new centers lower = {format_array(grad_out['lower_centers'])} -> {format_array(diagnostics['lower_spring']['new_centers'])}")
     print()
     print(
         "GRAD CL/CD/CM = "
-        f"{_polar_metric(grad_out, 'CL'):.6e} / "
-        f"{_polar_metric(grad_out, 'CD'):.6e} / "
-        f"{_polar_metric(grad_out, 'CM'):.6e}"
+        f"{polar_metric(grad_out, 'CL'):.6e} / "
+        f"{polar_metric(grad_out, 'CD'):.6e} / "
+        f"{polar_metric(grad_out, 'CM'):.6e}"
     )
     print(
         "GRAD+spring raw CL/CD/CM = "
-        f"{_polar_metric(grad_spring_raw_out, 'CL'):.6e} / "
-        f"{_polar_metric(grad_spring_raw_out, 'CD'):.6e} / "
-        f"{_polar_metric(grad_spring_raw_out, 'CM'):.6e}"
+        f"{polar_metric(grad_spring_raw_out, 'CL'):.6e} / "
+        f"{polar_metric(grad_spring_raw_out, 'CD'):.6e} / "
+        f"{polar_metric(grad_spring_raw_out, 'CM'):.6e}"
     )
     print(
         "FINAL CL/CD/CM = "
-        f"{_polar_metric(final_out, 'CL'):.6e} / "
-        f"{_polar_metric(final_out, 'CD'):.6e} / "
-        f"{_polar_metric(final_out, 'CM'):.6e}"
+        f"{polar_metric(final_out, 'CL'):.6e} / "
+        f"{polar_metric(final_out, 'CD'):.6e} / "
+        f"{polar_metric(final_out, 'CM'):.6e}"
     )
     print()
     print(f"GRAD scoring aero calls = {int(grad_out['n_scoring_aero_calls_total'])}")
@@ -656,7 +478,7 @@ def main():
             workdir=seed_dir / "adapt_grad",
             indicator="GRAD",
         )
-        _save_out_bundle(
+        save_out_bundle(
             seed_dir / "adapt_grad_output",
             x=x,
             out=grad_out,
@@ -689,7 +511,7 @@ def main():
         new_lower_centers = np.asarray(realloc_out["new_lower_centers"], dtype=float)
         a0_rebase = np.zeros(len(new_upper_centers) + len(new_lower_centers), dtype=float)
 
-        start_eval = _evaluate_geometry_state(
+        start_eval = evaluate_geometry_state(
             x=x,
             yu_init=grad_out["yu_opt"],
             yl_init=grad_out["yl_opt"],
@@ -699,6 +521,7 @@ def main():
             a_vec=a0_rebase,
             label="spring_rebase_start",
             workdir=seed_dir / "spring_rebase",
+            include_aero_calls=True,
         )
         _print_rebase_check(grad_out["err_opt"], start_eval)
 
@@ -730,7 +553,7 @@ def main():
             print("#############################################")
 
         if grad_spring_raw_out is not None:
-            _save_out_bundle(
+            save_out_bundle(
                 seed_dir / "spring_rebase_raw",
                 x=x,
                 out=grad_spring_raw_out,
@@ -746,7 +569,7 @@ def main():
         else:
             final_out = grad_out
 
-        _save_out_bundle(
+        save_out_bundle(
             seed_dir / "spring_rebase_final",
             x=x,
             out=final_out,
@@ -776,7 +599,7 @@ def main():
             total_grad_only=total_grad_only,
             total_grad_spring_raw=total_grad_spring_raw,
         )
-        _write_csv(seed_dir / "summary.csv", SUMMARY_FIELDS, [summary_row])
+        write_csv(seed_dir / "summary.csv", SUMMARY_FIELDS, [summary_row])
         summary_rows.append(summary_row)
 
         _print_final_recap(
@@ -795,7 +618,7 @@ def main():
         clear_cmplxfoil_solver_cache()
 
     if len(summary_rows) > 0:
-        _write_csv(base_output_dir / "summary_all.csv", SUMMARY_FIELDS, summary_rows)
+        write_csv(base_output_dir / "summary_all.csv", SUMMARY_FIELDS, summary_rows)
 
 
 if __name__ == "__main__":
