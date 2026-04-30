@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from geometry import apply_hicks_henne_deformation, build_normal_peak_fd_steps
+from geometry import build_normal_peak_fd_steps
 from settings import SETTINGS
 from objective import make_objective
 from adaptive_candidate import (
@@ -59,128 +59,15 @@ def trapezoid_weights(x):
     return np.maximum(w, 0.0)
 
 
-def _single_hicks_henne_bump_from_deformation(x, side, center, hh_power):
-    zero = np.zeros_like(np.asarray(x, dtype=float))
-    side_u = str(side).upper()
-
-    if side_u == "UPPER":
-        yu, _ = apply_hicks_henne_deformation(
-            x=x,
-            yu_base=zero,
-            yl_base=zero,
-            a_upper=[1.0],
-            a_lower=[],
-            upper_centers=[center],
-            lower_centers=[],
-            power=hh_power,
-        )
-        return np.asarray(yu, dtype=float)
-
-    if side_u == "LOWER":
-        _, yl = apply_hicks_henne_deformation(
-            x=x,
-            yu_base=zero,
-            yl_base=zero,
-            a_upper=[],
-            a_lower=[1.0],
-            upper_centers=[],
-            lower_centers=[center],
-            power=hh_power,
-        )
-        return np.asarray(yl, dtype=float)
-
-    raise ValueError(f"Unknown candidate side for Hicks-Henne bump: {side}")
-
-
-def compute_geometric_novelty(
-    x,
-    side,
-    candidate_center,
-    active_centers_same_side,
-    hh_power,
-    rcond=1e-10,
-    eps_norm=1e-30,
-):
-    x = np.asarray(x, dtype=float)
-    active_centers_same_side = list(active_centers_same_side)
-    opt_ad = SETTINGS["optimization"]["adaptive"]
-    novelty_eps = float(opt_ad.get("grad_novelty_eps", 0.10))
-    novelty_power = float(opt_ad.get("grad_novelty_power", 2.0))
-
-    phi_c = _single_hicks_henne_bump_from_deformation(
-        x=x,
-        side=side,
-        center=candidate_center,
-        hh_power=hh_power,
-    )
-    w = trapezoid_weights(x)
-    sqrt_w = np.sqrt(w)
-    phi_w = sqrt_w * phi_c
-    norm_phi = float(np.linalg.norm(phi_w))
-
-    if norm_phi < eps_norm:
-        novelty_distance = 0.0
-        return {
-            "novelty_distance": novelty_distance,
-            "novelty_factor": float(novelty_eps + (1.0 - novelty_eps) * novelty_distance**novelty_power),
-            "max_corr_geo": np.nan,
-            "norm_phi": norm_phi,
-            "projection_residual_norm": 0.0,
-            "projection_rank": 0,
-        }
-
-    if len(active_centers_same_side) == 0:
-        novelty_distance = 1.0
-        return {
-            "novelty_distance": novelty_distance,
-            "novelty_factor": float(novelty_eps + (1.0 - novelty_eps) * novelty_distance**novelty_power),
-            "max_corr_geo": 0.0,
-            "norm_phi": norm_phi,
-            "projection_residual_norm": norm_phi,
-            "projection_rank": 0,
-        }
-
-    phi_active = [
-        _single_hicks_henne_bump_from_deformation(
-            x=x,
-            side=side,
-            center=center,
-            hh_power=hh_power,
-        )
-        for center in active_centers_same_side
-    ]
-    Phi_A = np.column_stack(phi_active)
-    Phi_w = sqrt_w[:, None] * Phi_A
-
-    coeffs, _residuals, rank, _s = np.linalg.lstsq(Phi_w, phi_w, rcond=rcond)
-    residual = phi_w - Phi_w @ coeffs
-    residual_norm = float(np.linalg.norm(residual))
-    novelty_distance = float(np.clip(residual_norm / norm_phi, 0.0, 1.0))
-
-    active_norms = np.linalg.norm(Phi_w, axis=0)
-    valid = active_norms >= eps_norm
-    if np.any(valid):
-        corrs = np.abs(Phi_w[:, valid].T @ phi_w) / (active_norms[valid] * norm_phi)
-        max_corr_geo = float(np.max(corrs))
-    else:
-        max_corr_geo = np.nan
-
-    return {
-        "novelty_distance": novelty_distance,
-        "novelty_factor": float(novelty_eps + (1.0 - novelty_eps) * novelty_distance**novelty_power),
-        "max_corr_geo": max_corr_geo,
-        "norm_phi": norm_phi,
-        "projection_residual_norm": residual_norm,
-        "projection_rank": int(rank),
-    }
-
-
 def _get_grad_score_mode():
     mode = SETTINGS["optimization"]["adaptive"].get("grad_score_mode", "grad_norm")
     mode = str(mode).strip().lower()
-    allowed = {"grad_norm", "grad_new", "grad_orth", "gn_schur"}
+    allowed = ["grad_norm", "gn_schur"]
     if mode not in allowed:
-        raise ValueError(f"Unknown ADAPT_GRAD_SCORE_MODE={mode!r}; expected one of {sorted(allowed)}")
+        raise ValueError(
+            f"Unsupported ADAPT_GRAD_SCORE_MODE={mode!r}. "
+            f"Supported modes: {allowed}."
+        )
     return mode
 
 
@@ -579,30 +466,18 @@ def _score_candidate_grad(
             base_item=base_item,
         )
 
-    opt_ad = SETTINGS["optimization"]["adaptive"]
     grad_score_mode = _get_grad_score_mode()
     g_norm = float(np.linalg.norm(grad_j))
     g_new = float(np.real(grad_j[new_idx]))
     abs_g_new = abs(g_new)
 
-    novelty = compute_geometric_novelty(
-        x=x,
-        side=side,
-        candidate_center=xc,
-        active_centers_same_side=active_centers_same_side,
-        hh_power=SETTINGS["optimization"]["hh_power"],
-        rcond=float(opt_ad.get("grad_novelty_rcond", 1.0e-10)),
-    )
-    novelty_factor = float(novelty["novelty_factor"])
-
     if grad_score_mode == "grad_norm":
         score = g_norm
-    elif grad_score_mode == "grad_new":
-        score = abs_g_new
-    elif grad_score_mode == "grad_orth":
-        score = abs_g_new * novelty_factor
     else:
-        raise ValueError(f"Unknown ADAPT_GRAD_SCORE_MODE={grad_score_mode!r}")
+        raise ValueError(
+            f"Unsupported ADAPT_GRAD_SCORE_MODE={grad_score_mode!r}. "
+            "Supported modes: ['grad_norm', 'gn_schur']."
+        )
 
     if not np.isfinite(score):
         print(
@@ -622,7 +497,6 @@ def _score_candidate_grad(
         "g_norm": g_norm,
         "g_new": g_new,
         "abs_g_new": abs_g_new,
-        **novelty,
     }
 
 
@@ -930,12 +804,6 @@ def score_candidate(
             "g_norm": out["g_norm"],
             "g_new": out["g_new"],
             "abs_g_new": out["abs_g_new"],
-            "novelty_distance": np.nan,
-            "novelty_factor": np.nan,
-            "max_corr_geo": np.nan,
-            "norm_phi": np.nan,
-            "projection_residual_norm": np.nan,
-            "projection_rank": 0,
             "gn_g_perp": out["gn_g_perp"],
             "gn_q_schur": out["gn_q_schur"],
             "gn_alpha_unclipped": out["gn_alpha_unclipped"],
@@ -969,9 +837,6 @@ def score_candidate(
         f"score={out['score']:.6e}  "
         f"g_norm={out['g_norm']:.6e}  "
         f"g_new={out['component']:.6e}  "
-        f"novelty_d={out['novelty_distance']:.6e}  "
-        f"novelty_factor={out['novelty_factor']:.6e}  "
-        f"max_corr_geo={out['max_corr_geo']:.6e}  "
         f"mode={out['mode']}  "
         f"n_fail_dirs={out['fd_diag']['n_fail_dirs']}  "
         f"score_aero_calls={int(objective.aero_call_counter_by_phase.get('score', 0))}  "
@@ -993,12 +858,6 @@ def score_candidate(
         "g_norm": out["g_norm"],
         "g_new": out["g_new"],
         "abs_g_new": out["abs_g_new"],
-        "novelty_distance": out["novelty_distance"],
-        "novelty_factor": out["novelty_factor"],
-        "max_corr_geo": out["max_corr_geo"],
-        "norm_phi": out["norm_phi"],
-        "projection_residual_norm": out["projection_residual_norm"],
-        "projection_rank": out["projection_rank"],
         "gn_g_perp": np.nan,
         "gn_q_schur": np.nan,
         "gn_alpha_unclipped": np.nan,

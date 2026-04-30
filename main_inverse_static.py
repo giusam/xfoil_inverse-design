@@ -5,7 +5,7 @@ import argparse
 
 def _load_runtime_imports():
     global np
-    global SETTINGS, apply_cfg_overrides
+    global SETTINGS, apply_cfg_overrides, validate_settings
     global build_naca0012_surfaces, build_random_initial_geometry, write_dat
     global clean_workdir, run_xfoil
     global run_cmplxfoil, clear_cmplxfoil_solver_cache
@@ -16,13 +16,15 @@ def _load_runtime_imports():
     global cleanup_debug_files
     global build_hh_centers, split_total_across_sides
     global run_adaptive_strategy
-    global make_seed_result, print_aggregate_summary, print_initial_state
-    global print_seed_recap, report_initial_aero_failure, save_seed_outputs
-    global write_global_summary
+    global print_initial_state, report_initial_aero_failure
+    global make_method_result_bundle, run_grad_spring_final_pipeline
+    global run_grad_spring_periodic_pipeline, save_out_bundle
+    global build_method_summary_row, method_summary_fields, write_csv
+    global write_standard_method_plots
 
     import numpy as np
 
-    from settings import SETTINGS, apply_cfg_overrides
+    from settings import SETTINGS, apply_cfg_overrides, validate_settings
     from geometry import build_naca0012_surfaces, build_random_initial_geometry, write_dat
     from xfoil_wrapper import clean_workdir, run_xfoil
     from cmplxfoil_wrapper import run_cmplxfoil, clear_cmplxfoil_solver_cache
@@ -33,14 +35,16 @@ def _load_runtime_imports():
     from cleanup import cleanup_debug_files
     from adaptive_utils import build_hh_centers, split_total_across_sides
     from adaptive_strategy import run_adaptive_strategy
-    from reporting import (
-        make_seed_result,
-        print_aggregate_summary,
-        print_initial_state,
-        print_seed_recap,
-        report_initial_aero_failure,
-        save_seed_outputs,
-        write_global_summary,
+    from reporting import print_initial_state, report_initial_aero_failure
+    from experiment_utils import (
+        build_method_summary_row,
+        make_method_result_bundle,
+        method_summary_fields,
+        run_grad_spring_final_pipeline,
+        run_grad_spring_periodic_pipeline,
+        save_out_bundle,
+        write_csv,
+        write_standard_method_plots,
     )
 
 
@@ -154,7 +158,7 @@ def _parse_args():
     return parser.parse_args()
 
 
-def main():
+def main(forced_run_settings=None, forced_adaptive_spring_settings=None):
     args = _parse_args()
     _load_runtime_imports()
 
@@ -164,6 +168,13 @@ def main():
 
     if args.seed is not None:
         SETTINGS["initial_shape"]["seed_list"] = [int(args.seed)]
+
+    if forced_run_settings:
+        SETTINGS["run"].update(forced_run_settings)
+    if forced_adaptive_spring_settings:
+        SETTINGS["adaptive_spring"].update(forced_adaptive_spring_settings)
+
+    validate_settings()
 
     base_dir = Path(__file__).resolve().parent
 
@@ -203,11 +214,16 @@ def main():
         seeds_to_run = [int(s) for s in seed_list]
 
     do_static = bool(SETTINGS.get("run", {}).get("do_static", True))
-    adaptive_modes = _get_active_adaptive_modes()
+    run_cfg = SETTINGS.get("run", {})
+    do_grad_method = bool(run_cfg.get("do_adaptive_grad", False))
+    do_spring = bool(run_cfg.get("do_adaptive_spring", False))
+    spring_mode = str(SETTINGS.get("adaptive_spring", {}).get("mode", "final")).strip().lower()
+    adaptive_modes = [m for m in _get_active_adaptive_modes() if m != "GRAD"]
 
-    if not do_static and len(adaptive_modes) == 0:
+    if not do_static and not do_grad_method and not do_spring and len(adaptive_modes) == 0:
         raise RuntimeError(
-            "Activate at least one among run.do_static, run.do_adaptive_grad, run.do_adaptive_ikkt, run.do_adaptive_pred, run.do_adaptive_oracle."
+            "Activate at least one among RUN_DO_STATIC, RUN_DO_ADAPTIVE_GRAD, RUN_DO_ADAPTIVE_SPRING, "
+            "RUN_DO_ADAPTIVE_IKKT, RUN_DO_ADAPTIVE_PRED, RUN_DO_ADAPTIVE_ORACLE."
         )
     import gc
 
@@ -301,6 +317,9 @@ def main():
             ),
         )
 
+        method_results = {}
+        adaptive_aux = {}
+
         if do_static:
             n_static = SETTINGS["optimization"]["n_hh_static"]
             n_upper, n_lower = split_total_across_sides(n_static)
@@ -322,44 +341,149 @@ def main():
                 current_best_error=err_init,
                 workdir=Path(workdir) / "static",
             )
+            save_out_bundle(Path(workdir) / "static", x=x, out=static_out, name="STATIC")
+            method_results["STATIC"] = make_method_result_bundle(
+                method_name="STATIC",
+                seed=seed,
+                x=x,
+                yu_init=yu_init,
+                yl_init=yl_init,
+                cp_target=cp_target,
+                cp_init=cp_init,
+                out=static_out,
+                workdir=Path(workdir) / "static",
+                extra={
+                    "total_scoring_aero_calls": 0,
+                    "total_optimization_aero_calls": int(static_out.get("n_optimization_aero_calls_total", 0)),
+                    "total_function_evals": int(static_out.get("n_function_evals", 0)),
+                    "total_gradient_evals": int(static_out.get("n_gradient_evals", 0)),
+                    "total_aero_calls": int(static_out.get("n_optimization_aero_calls_total", 0)),
+                },
+            )
         else:
             print("===== STATIC OPTIMIZATION =====")
             print("Skipped because SETTINGS['run']['do_static'] = False")
             static_out = _static_placeholder(err_init, init_res)
 
-        adaptive_runs = {}
-        snapshot_dirs_to_move = []
-
-        for mode in adaptive_modes:
-            mode_key = f"adapt_{mode.lower()}"
-
-            adaptive_runs[mode_key] = run_adaptive_strategy(
+        grad_needed_for_spring_final = do_spring and spring_mode in {"final", "both"}
+        grad_out = None
+        if do_grad_method or grad_needed_for_spring_final:
+            grad_out = run_adaptive_strategy(
                 x=x,
                 yu_init=yu_init,
                 yl_init=yl_init,
                 cp_target=cp_target,
                 initial_error=err_init,
-                workdir=Path(workdir) / mode_key,
+                workdir=Path(workdir) / "adapt_grad",
+                indicator="GRAD",
+            )
+            save_out_bundle(Path(workdir) / "adapt_grad", x=x, out=grad_out, name="ADAPT_GRAD")
+            adaptive_aux["ADAPT_GRAD"] = grad_out
+            if do_grad_method:
+                method_results["ADAPT_GRAD"] = make_method_result_bundle(
+                    method_name="ADAPT_GRAD",
+                    seed=seed,
+                    x=x,
+                    yu_init=yu_init,
+                    yl_init=yl_init,
+                    cp_target=cp_target,
+                    cp_init=cp_init,
+                    out=grad_out,
+                    workdir=Path(workdir) / "adapt_grad",
+                )
+
+        old_grad_score_mode = SETTINGS["optimization"]["adaptive"].get("grad_score_mode", "grad_norm")
+        force_mode = str(SETTINGS.get("adaptive_spring", {}).get("force_grad_score_mode", "")).strip().lower()
+        if do_spring and force_mode:
+            if force_mode != "grad_norm":
+                print(f"[warning] adaptive spring requested force_grad_score_mode={force_mode!r}; current stabilized mode is 'grad_norm'.")
+            SETTINGS["optimization"]["adaptive"]["grad_score_mode"] = force_mode
+
+        try:
+            if do_spring and spring_mode in {"final", "both"}:
+                spring_adapt_out = grad_out
+                if force_mode and str(old_grad_score_mode).strip().lower() != force_mode:
+                    spring_adapt_out = None
+                final_pipeline = run_grad_spring_final_pipeline(
+                    x=x,
+                    yu_init=yu_init,
+                    yl_init=yl_init,
+                    cp_target=cp_target,
+                    initial_error=err_init,
+                    workdir=Path(workdir) / "grad_spring_final",
+                    adapt_out=spring_adapt_out,
+                )
+                final_out = final_pipeline["final_out"]
+                method_results["GRAD_SPRING_FINAL"] = make_method_result_bundle(
+                    method_name="GRAD_SPRING_FINAL",
+                    seed=seed,
+                    x=x,
+                    yu_init=yu_init,
+                    yl_init=yl_init,
+                    cp_target=cp_target,
+                    cp_init=cp_init,
+                    out=final_out,
+                    workdir=Path(workdir) / "grad_spring_final",
+                    extra=final_pipeline,
+                )
+
+            if do_spring and spring_mode in {"periodic", "both"}:
+                periodic_pipeline = run_grad_spring_periodic_pipeline(
+                    x=x,
+                    yu_init=yu_init,
+                    yl_init=yl_init,
+                    cp_target=cp_target,
+                    initial_error=err_init,
+                    workdir=Path(workdir) / "grad_spring_periodic",
+                )
+                periodic_out = periodic_pipeline["final_out"]
+                method_results["GRAD_SPRING_PERIODIC"] = make_method_result_bundle(
+                    method_name="GRAD_SPRING_PERIODIC",
+                    seed=seed,
+                    x=x,
+                    yu_init=yu_init,
+                    yl_init=yl_init,
+                    cp_target=cp_target,
+                    cp_init=cp_init,
+                    out=periodic_out,
+                    workdir=Path(workdir) / "grad_spring_periodic",
+                    extra=periodic_pipeline,
+                )
+        finally:
+            SETTINGS["optimization"]["adaptive"]["grad_score_mode"] = old_grad_score_mode
+
+        for mode in adaptive_modes:
+            mode_key = f"ADAPT_{mode}"
+            out = run_adaptive_strategy(
+                x=x,
+                yu_init=yu_init,
+                yl_init=yl_init,
+                cp_target=cp_target,
+                initial_error=err_init,
+                workdir=Path(workdir) / mode_key.lower(),
                 indicator=mode,
             )
+            save_out_bundle(Path(workdir) / mode_key.lower(), x=x, out=out, name=mode_key)
+            method_results[mode_key] = make_method_result_bundle(
+                method_name=mode_key,
+                seed=seed,
+                x=x,
+                yu_init=yu_init,
+                yl_init=yl_init,
+                cp_target=cp_target,
+                cp_init=cp_init,
+                out=out,
+                workdir=Path(workdir) / mode_key.lower(),
+            )
 
-            if snapshots_enabled:
-                local_snapshot_dir = Path(workdir) / mode_key / SETTINGS["snapshots"]["dir_name"]
-                snapshot_dirs_to_move.append((mode_key, local_snapshot_dir))
+        print("===== FINAL METHOD RECAP =====")
+        print(f"seed = {seed}")
+        print(f"Initial Cp error = {float(err_init):.6e}")
+        for method_name, bundle in method_results.items():
+            print(f"{method_name:<22s} Cp error = {float(bundle['err_final']):.6e}")
 
-        print_seed_recap(
-            seed=seed,
-            err_init=err_init,
-            init_res=init_res,
-            static_out=static_out,
-            adaptive_runs=adaptive_runs,
-            target_res=target_res,
-        )
-
-        save_seed_outputs(
-            summary_dir=summary_dir,
-            workdir=workdir,
-            seed=seed,
+        write_standard_method_plots(
+            method_results=method_results,
             x=x,
             yu_target=yu_target,
             yl_target=yl_target,
@@ -367,26 +491,19 @@ def main():
             yl_init=yl_init,
             cp_target=cp_target,
             cp_init=cp_init,
-            err_init=err_init,
-            init_res=init_res,
-            static_out=static_out,
-            adaptive_runs=adaptive_runs,
-            target_res=target_res,
+            output_dir=Path(workdir) / "plots",
         )
 
-        results.append(
-            make_seed_result(
-                seed=seed,
-                err_init=err_init,
-                static_out=static_out,
-                adaptive_runs=adaptive_runs,
-            )
-        )
+        summary_row = build_method_summary_row(seed=seed, err_init=err_init, method_results=method_results)
+        summary_fields = method_summary_fields([summary_row])
+        write_csv(Path(workdir) / "summary.csv", summary_fields, [summary_row])
+        write_csv(summary_dir / "global_summary.csv", summary_fields, [summary_row])
+        results.append(summary_row)
 
         if snapshots_enabled:
-            for mode_key, local_snapshot_dir in snapshot_dirs_to_move:
+            for mode_key in ["adapt_grad", "grad_spring_final", "grad_spring_periodic"] + [f"adapt_{m.lower()}" for m in adaptive_modes]:
+                local_snapshot_dir = Path(workdir) / mode_key / SETTINGS["snapshots"]["dir_name"]
                 if not local_snapshot_dir.exists():
-                    print(f"[warning] snapshot dir not found: {local_snapshot_dir}")
                     continue
 
                 persistent_snapshot_dir = snap_root / f"seed_{seed}" / mode_key
@@ -415,7 +532,7 @@ def main():
         clear_cmplxfoil_solver_cache()
 
         for name in [
-            "static_out", "adaptive_runs",
+            "static_out", "method_results",
             "target_res", "init_res",
             "cp_target", "cp_init",
             "x", "yu_target", "yl_target", "yu_init", "yl_init",
@@ -429,8 +546,11 @@ def main():
         print("Nessun seed completato con successo.")
         return
 
-    write_global_summary(base_workdir, results)
-    print_aggregate_summary(results)
+    global_fields = method_summary_fields(results)
+    write_csv(base_workdir / "global_summary.csv", global_fields, results)
+    print("\n===== AGGREGATE SUMMARY =====")
+    for row in results:
+        print(f"seed={row['seed']}  J_initial={float(row['J_initial']):.6e}")
 
 
 if __name__ == "__main__":

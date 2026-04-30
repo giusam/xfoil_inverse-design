@@ -9,6 +9,7 @@ SETTINGS = {
         "do_adaptive_ikkt": False,
         "do_adaptive_pred": False,
         "do_adaptive_oracle": False,
+        "do_adaptive_spring": False,
     },
 
     "xfoil": {
@@ -120,9 +121,6 @@ SETTINGS = {
             "interval_sampling_mode": "midpoint",
             "interval_sampling_fractions": [0.25, 0.5, 0.75],
             "grad_score_mode": "grad_norm",
-            "grad_novelty_eps": 0.10,
-            "grad_novelty_power": 2.0,
-            "grad_novelty_rcond": 1.0e-10,
             "write_candidate_score_csv": True,
             "gn_schur_reg": 1.0e-10,
             "gn_schur_rcond": 1.0e-10,
@@ -149,6 +147,15 @@ SETTINGS = {
     "periodic_spring_adaptive": {
         "enabled": False,
         "levels": [12, 16, 20],
+        "accept_mode_intermediate": "rebase_keep_new_centers",
+        "accept_mode_final": "accept_if_improved",
+        "force_grad_score_mode": "grad_norm",
+    },
+
+    "adaptive_spring": {
+        "enabled": False,
+        "mode": "final",
+        "periodic_levels": [12, 16, 20],
         "accept_mode_intermediate": "rebase_keep_new_centers",
         "accept_mode_final": "accept_if_improved",
         "force_grad_score_mode": "grad_norm",
@@ -188,6 +195,7 @@ _CFG_KEY_MAP = {
     "RUN_DO_ADAPTIVE_IKKT": ("run", "do_adaptive_ikkt"),
     "RUN_DO_ADAPTIVE_PRED": ("run", "do_adaptive_pred"),
     "RUN_DO_ADAPTIVE_ORACLE": ("run", "do_adaptive_oracle"),
+    "RUN_DO_ADAPTIVE_SPRING": ("run", "do_adaptive_spring"),
 
     # ---------------------------
     # xfoil / aero conditions
@@ -249,13 +257,19 @@ _CFG_KEY_MAP = {
     "ADAPT_INTERVAL_SAMPLING_MODE": ("optimization", "adaptive", "interval_sampling_mode"),
     "ADAPT_INTERVAL_SAMPLING_FRACTIONS": ("optimization", "adaptive", "interval_sampling_fractions"),
     "ADAPT_GRAD_SCORE_MODE": ("optimization", "adaptive", "grad_score_mode"),
-    "ADAPT_GRAD_NOVELTY_EPS": ("optimization", "adaptive", "grad_novelty_eps"),
-    "ADAPT_GRAD_NOVELTY_POWER": ("optimization", "adaptive", "grad_novelty_power"),
-    "ADAPT_GRAD_NOVELTY_RCOND": ("optimization", "adaptive", "grad_novelty_rcond"),
     "ADAPT_WRITE_CANDIDATE_SCORE_CSV": ("optimization", "adaptive", "write_candidate_score_csv"),
     "ADAPT_GN_SCHUR_REG": ("optimization", "adaptive", "gn_schur_reg"),
     "ADAPT_GN_SCHUR_RCOND": ("optimization", "adaptive", "gn_schur_rcond"),
     "ADAPT_GN_SCHUR_FD_TARGET_PEAK_NORMAL": ("optimization", "adaptive", "gn_schur_fd_target_peak_normal"),
+
+    # ---------------------------
+    # adaptive_spring
+    # ---------------------------
+    "ADAPTIVE_SPRING_MODE": ("adaptive_spring", "mode"),
+    "ADAPTIVE_SPRING_PERIODIC_LEVELS": ("adaptive_spring", "periodic_levels"),
+    "ADAPTIVE_SPRING_FORCE_GRAD_SCORE_MODE": ("adaptive_spring", "force_grad_score_mode"),
+    "ADAPTIVE_SPRING_ACCEPT_MODE_INTERMEDIATE": ("adaptive_spring", "accept_mode_intermediate"),
+    "ADAPTIVE_SPRING_ACCEPT_MODE_FINAL": ("adaptive_spring", "accept_mode_final"),
 
     # ---------------------------
     # spring_reallocation
@@ -352,11 +366,67 @@ def _set_nested_value(root, path, value):
     node[path[-1]] = value
 
 
+def validate_settings():
+    score_mode = str(
+        SETTINGS["optimization"]["adaptive"].get("grad_score_mode", "grad_norm")
+    ).strip().lower()
+    supported_score_modes = ["grad_norm", "gn_schur"]
+    if score_mode not in supported_score_modes:
+        raise ValueError(
+            f"Unsupported ADAPT_GRAD_SCORE_MODE={score_mode!r}. "
+            f"Supported modes: {supported_score_modes}."
+        )
+    SETTINGS["optimization"]["adaptive"]["grad_score_mode"] = score_mode
+
+    adaptive_spring = SETTINGS.setdefault("adaptive_spring", {})
+    mode = str(adaptive_spring.get("mode", "final")).strip().lower()
+    supported_spring_modes = ["final", "periodic", "both"]
+    if mode not in supported_spring_modes:
+        raise ValueError(
+            f"Unsupported ADAPTIVE_SPRING_MODE={mode!r}. "
+            f"Supported modes: {supported_spring_modes}."
+        )
+    adaptive_spring["mode"] = mode
+    adaptive_spring["enabled"] = bool(
+        SETTINGS.get("run", {}).get("do_adaptive_spring", adaptive_spring.get("enabled", False))
+    )
+
+
+def _sync_periodic_spring_aliases(seen_keys):
+    periodic = SETTINGS.get("periodic_spring_adaptive", {})
+    adaptive = SETTINGS.get("adaptive_spring", {})
+
+    if "PERIODIC_SPRING_ENABLED" in seen_keys and "RUN_DO_ADAPTIVE_SPRING" not in seen_keys:
+        SETTINGS["run"]["do_adaptive_spring"] = bool(periodic.get("enabled", False))
+        adaptive["enabled"] = bool(periodic.get("enabled", False))
+    if "PERIODIC_SPRING_LEVELS" in seen_keys and "ADAPTIVE_SPRING_PERIODIC_LEVELS" not in seen_keys:
+        adaptive["periodic_levels"] = list(periodic.get("levels", [12, 16, 20]))
+    if (
+        "PERIODIC_SPRING_ACCEPT_MODE_INTERMEDIATE" in seen_keys
+        and "ADAPTIVE_SPRING_ACCEPT_MODE_INTERMEDIATE" not in seen_keys
+    ):
+        adaptive["accept_mode_intermediate"] = periodic.get(
+            "accept_mode_intermediate",
+            "rebase_keep_new_centers",
+        )
+    if (
+        "PERIODIC_SPRING_ACCEPT_MODE_FINAL" in seen_keys
+        and "ADAPTIVE_SPRING_ACCEPT_MODE_FINAL" not in seen_keys
+    ):
+        adaptive["accept_mode_final"] = periodic.get("accept_mode_final", "accept_if_improved")
+    if (
+        "PERIODIC_SPRING_FORCE_GRAD_SCORE_MODE" in seen_keys
+        and "ADAPTIVE_SPRING_FORCE_GRAD_SCORE_MODE" not in seen_keys
+    ):
+        adaptive["force_grad_score_mode"] = periodic.get("force_grad_score_mode", "grad_norm")
+
+
 def apply_cfg_overrides(cfg_path):
     cfg_path = Path(cfg_path)
     if not cfg_path.exists():
         raise FileNotFoundError(f"CFG file not found: {cfg_path}")
 
+    seen_keys = set()
     for lineno, raw_line in enumerate(cfg_path.read_text(encoding="utf-8").splitlines(), start=1):
         line = raw_line.strip()
 
@@ -376,3 +446,7 @@ def apply_cfg_overrides(cfg_path):
 
         value = _parse_cfg_value(raw_value)
         _set_nested_value(SETTINGS, _CFG_KEY_MAP[key], value)
+        seen_keys.add(key)
+
+    _sync_periodic_spring_aliases(seen_keys)
+    validate_settings()

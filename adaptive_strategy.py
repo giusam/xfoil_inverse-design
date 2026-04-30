@@ -197,12 +197,6 @@ def _write_candidate_score_csv(workdir, level, ndv_current, scored_candidates):
         "g_norm",
         "g_new",
         "abs_g_new",
-        "novelty_distance",
-        "novelty_factor",
-        "max_corr_geo",
-        "norm_phi",
-        "projection_residual_norm",
-        "projection_rank",
         "gn_g_perp",
         "gn_q_schur",
         "gn_alpha_unclipped",
@@ -232,12 +226,6 @@ def _write_candidate_score_csv(workdir, level, ndv_current, scored_candidates):
                 "g_norm": float(item.get("g_norm", np.nan)),
                 "g_new": float(item.get("g_new", np.nan)),
                 "abs_g_new": float(item.get("abs_g_new", np.nan)),
-                "novelty_distance": float(item.get("novelty_distance", np.nan)),
-                "novelty_factor": float(item.get("novelty_factor", np.nan)),
-                "max_corr_geo": float(item.get("max_corr_geo", np.nan)),
-                "norm_phi": float(item.get("norm_phi", np.nan)),
-                "projection_residual_norm": float(item.get("projection_residual_norm", np.nan)),
-                "projection_rank": int(item.get("projection_rank", 0)),
                 "gn_g_perp": float(item.get("gn_g_perp", np.nan)),
                 "gn_q_schur": float(item.get("gn_q_schur", np.nan)),
                 "gn_alpha_unclipped": float(item.get("gn_alpha_unclipped", np.nan)),
@@ -343,7 +331,7 @@ def _score_candidate_oracle(
         "err_after": float(out["err_opt"]),
     }
 
-def run_adaptive_strategy(
+def _run_adaptive_strategy_legacy_unused(
     x,
     yu_init,
     yl_init,
@@ -356,11 +344,11 @@ def run_adaptive_strategy(
     indicator_u = str(indicator).upper()
     grad_score_mode = str(opt_ad.get("grad_score_mode", "grad_norm")).strip().lower()
     if indicator_u == "GRAD":
-        allowed_grad_score_modes = {"grad_norm", "grad_new", "grad_orth", "gn_schur"}
+        allowed_grad_score_modes = ["grad_norm", "gn_schur"]
         if grad_score_mode not in allowed_grad_score_modes:
             raise ValueError(
-                f"Unknown ADAPT_GRAD_SCORE_MODE={grad_score_mode!r}; "
-                f"expected one of {sorted(allowed_grad_score_modes)}"
+                f"Unsupported ADAPT_GRAD_SCORE_MODE={grad_score_mode!r}. "
+                f"Supported modes: {allowed_grad_score_modes}."
             )
         print(f"ADAPT_GRAD score mode = {grad_score_mode}")
 
@@ -403,6 +391,15 @@ def run_adaptive_strategy(
         label="adaptive_level_0",
         current_best_error=current_best_error,
         workdir=Path(workdir) / "adaptive",
+    )
+    _save_level_snapshot(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        cp_target=cp_target,
+        adaptive_out=adaptive_out,
+        label=f"adaptive_from_state_level_{len(upper_centers) + len(lower_centers)}",
+        workdir=workdir,
     )
     _save_level_snapshot(
         x=x,
@@ -580,12 +577,6 @@ def run_adaptive_strategy(
                     "g_norm": info.get("g_norm", np.nan),
                     "g_new": info.get("g_new", info.get("raw_grad", np.nan)),
                     "abs_g_new": info.get("abs_g_new", abs(float(info.get("raw_grad", np.nan))) if np.isfinite(info.get("raw_grad", np.nan)) else np.nan),
-                    "novelty_distance": info.get("novelty_distance", np.nan),
-                    "novelty_factor": info.get("novelty_factor", np.nan),
-                    "max_corr_geo": info.get("max_corr_geo", np.nan),
-                    "norm_phi": info.get("norm_phi", np.nan),
-                    "projection_residual_norm": info.get("projection_residual_norm", np.nan),
-                    "projection_rank": info.get("projection_rank", 0),
                     "gn_g_perp": info.get("gn_g_perp", np.nan),
                     "gn_q_schur": info.get("gn_q_schur", np.nan),
                     "gn_alpha_unclipped": info.get("gn_alpha_unclipped", np.nan),
@@ -689,6 +680,15 @@ def run_adaptive_strategy(
             label=level_label,
             current_best_error=current_best_error,
             workdir=Path(workdir) / "adaptive",
+        )
+        _save_level_snapshot(
+            x=x,
+            yu_init=yu_init,
+            yl_init=yl_init,
+            cp_target=cp_target,
+            adaptive_out=adaptive_out,
+            label=level_label,
+            workdir=workdir,
         )
         _save_level_snapshot(
             x=x,
@@ -819,11 +819,11 @@ def run_adaptive_strategy_from_state(
     indicator_u = str(indicator).upper()
     grad_score_mode = str(opt_ad.get("grad_score_mode", "grad_norm")).strip().lower()
     if indicator_u == "GRAD":
-        allowed_grad_score_modes = {"grad_norm", "grad_new", "grad_orth", "gn_schur"}
+        allowed_grad_score_modes = ["grad_norm", "gn_schur"]
         if grad_score_mode not in allowed_grad_score_modes:
             raise ValueError(
-                f"Unknown ADAPT_GRAD_SCORE_MODE={grad_score_mode!r}; "
-                f"expected one of {sorted(allowed_grad_score_modes)}"
+                f"Unsupported ADAPT_GRAD_SCORE_MODE={grad_score_mode!r}. "
+                f"Supported modes: {allowed_grad_score_modes}."
             )
         print(f"ADAPT_GRAD score mode = {grad_score_mode}")
 
@@ -972,12 +972,6 @@ def run_adaptive_strategy_from_state(
                     "g_norm": info.get("g_norm", np.nan),
                     "g_new": info.get("g_new", info.get("raw_grad", np.nan)),
                     "abs_g_new": info.get("abs_g_new", abs(float(info.get("raw_grad", np.nan))) if np.isfinite(info.get("raw_grad", np.nan)) else np.nan),
-                    "novelty_distance": info.get("novelty_distance", np.nan),
-                    "novelty_factor": info.get("novelty_factor", np.nan),
-                    "max_corr_geo": info.get("max_corr_geo", np.nan),
-                    "norm_phi": info.get("norm_phi", np.nan),
-                    "projection_residual_norm": info.get("projection_residual_norm", np.nan),
-                    "projection_rank": info.get("projection_rank", 0),
                     "gn_g_perp": info.get("gn_g_perp", np.nan),
                     "gn_q_schur": info.get("gn_q_schur", np.nan),
                     "gn_alpha_unclipped": info.get("gn_alpha_unclipped", np.nan),
@@ -1101,3 +1095,38 @@ def run_adaptive_strategy_from_state(
     if indicator_u == "GRAD":
         adaptive_out["grad_score_mode"] = grad_score_mode
     return adaptive_out
+
+
+def run_adaptive_strategy(
+    x,
+    yu_init,
+    yl_init,
+    cp_target,
+    initial_error,
+    workdir,
+    indicator,
+):
+    opt_ad = SETTINGS["optimization"]["adaptive"]
+    snapshots_cfg = SETTINGS.get("snapshots", {})
+    if bool(snapshots_cfg.get("enabled", False)):
+        snapshot_dir = Path(workdir) / str(snapshots_cfg.get("dir_name", "snapshots"))
+        if snapshot_dir.exists():
+            shutil.rmtree(snapshot_dir)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    upper_centers, lower_centers = build_side_specific_initial_centers(int(opt_ad["n0"]))
+    a0 = np.zeros(len(upper_centers) + len(lower_centers), dtype=float)
+    out = run_adaptive_strategy_from_state(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        cp_target=cp_target,
+        initial_error=initial_error,
+        workdir=workdir,
+        indicator=indicator,
+        initial_upper_centers=upper_centers,
+        initial_lower_centers=lower_centers,
+        initial_a0=a0,
+        n_final_override=int(opt_ad["n_final"]),
+    )
+    return out
