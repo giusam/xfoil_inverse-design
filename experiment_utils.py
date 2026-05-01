@@ -732,15 +732,27 @@ def run_grad_spring_periodic_pipeline(
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     cfg = SETTINGS["adaptive_spring"]
-    levels = sorted(int(v) for v in cfg.get("periodic_levels", [12, 16, 20]))
+    periodic_policy = str(cfg.get("periodic_policy", "levels")).strip().lower()
+    n0 = int(SETTINGS["optimization"]["adaptive"]["n0"])
+    n_final = int(SETTINGS["optimization"]["adaptive"]["n_final"])
+    if periodic_policy == "levels":
+        levels = sorted(int(v) for v in cfg.get("periodic_levels", [12, 16, 20]))
+    elif periodic_policy == "every_refine":
+        levels = list(range(n0 + 1, n_final + 1))
+    else:
+        raise ValueError(
+            f"Unsupported ADAPTIVE_SPRING_PERIODIC_POLICY={periodic_policy!r}. "
+            "Supported policies: ['levels', 'every_refine']."
+        )
     if not levels:
-        raise ValueError("ADAPTIVE_SPRING_PERIODIC_LEVELS must contain at least one level.")
+        raise ValueError("Periodic spring levels must contain at least one level.")
+    print(f"ADAPTIVE_SPRING periodic policy = {periodic_policy}")
+    print(f"periodic spring levels = {levels}")
     if str(cfg.get("accept_mode_intermediate", "rebase_keep_new_centers")).strip().lower() != "rebase_keep_new_centers":
         raise ValueError("ADAPTIVE_SPRING_ACCEPT_MODE_INTERMEDIATE supports only 'rebase_keep_new_centers'.")
     if str(cfg.get("accept_mode_final", "accept_if_improved")).strip().lower() != "accept_if_improved":
         raise ValueError("ADAPTIVE_SPRING_ACCEPT_MODE_FINAL supports only 'accept_if_improved'.")
 
-    n0 = int(SETTINGS["optimization"]["adaptive"]["n0"])
     current_upper, current_lower = build_side_specific_initial_centers(n0)
     current_a0 = np.zeros(len(current_upper) + len(current_lower), dtype=float)
     current_base_yu = np.asarray(yu_init, dtype=float)

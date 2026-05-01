@@ -155,6 +155,7 @@ SETTINGS = {
     "adaptive_spring": {
         "enabled": False,
         "mode": "final",
+        "periodic_policy": "levels",
         "periodic_levels": [12, 16, 20],
         "accept_mode_intermediate": "rebase_keep_new_centers",
         "accept_mode_final": "accept_if_improved",
@@ -266,6 +267,7 @@ _CFG_KEY_MAP = {
     # adaptive_spring
     # ---------------------------
     "ADAPTIVE_SPRING_MODE": ("adaptive_spring", "mode"),
+    "ADAPTIVE_SPRING_PERIODIC_POLICY": ("adaptive_spring", "periodic_policy"),
     "ADAPTIVE_SPRING_PERIODIC_LEVELS": ("adaptive_spring", "periodic_levels"),
     "ADAPTIVE_SPRING_FORCE_GRAD_SCORE_MODE": ("adaptive_spring", "force_grad_score_mode"),
     "ADAPTIVE_SPRING_ACCEPT_MODE_INTERMEDIATE": ("adaptive_spring", "accept_mode_intermediate"),
@@ -390,6 +392,14 @@ def validate_settings():
     adaptive_spring["enabled"] = bool(
         SETTINGS.get("run", {}).get("do_adaptive_spring", adaptive_spring.get("enabled", False))
     )
+    periodic_policy = str(adaptive_spring.get("periodic_policy", "levels")).strip().lower()
+    supported_periodic_policies = ["levels", "every_refine"]
+    if periodic_policy not in supported_periodic_policies:
+        raise ValueError(
+            f"Unsupported ADAPTIVE_SPRING_PERIODIC_POLICY={periodic_policy!r}. "
+            f"Supported policies: {supported_periodic_policies}."
+        )
+    adaptive_spring["periodic_policy"] = periodic_policy
 
 
 def _sync_periodic_spring_aliases(seen_keys):
