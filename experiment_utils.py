@@ -602,6 +602,41 @@ def _spring_reopt_succeeded(spring_out, reference_err):
     return np.isfinite(err) and err < float(reference_err)
 
 
+def _resolve_adaptive_spring_levels():
+    cfg = SETTINGS["adaptive_spring"]
+    adapt_cfg = SETTINGS["optimization"]["adaptive"]
+
+    enabled = bool(cfg.get("enabled", False))
+    mode = str(cfg.get("mode", "final")).strip().lower()
+
+    n0 = int(adapt_cfg["n0"])
+    n_final = int(adapt_cfg["n_final"])
+
+    if not enabled:
+        return mode, []
+
+    if mode == "final":
+        return mode, [n_final]
+
+    if mode == "every_refine":
+        return mode, list(range(n0 + 1, n_final + 1))
+
+    if mode == "levels":
+        levels = sorted(int(v) for v in cfg.get("levels", []))
+        levels = [v for v in levels if n0 < v <= n_final]
+        if not levels:
+            raise ValueError(
+                "ADAPTIVE_SPRING_LEVELS must contain at least one level "
+                "with ADAPT_N0 < level <= ADAPT_N_FINAL."
+            )
+        return mode, levels
+
+    raise ValueError(
+        f"Unsupported ADAPTIVE_SPRING_MODE={mode!r}. "
+        "Supported modes: ['final', 'every_refine', 'levels']."
+    )
+
+
 def _reallocate_with_settings(x, adapt_out):
     spring_cfg = SETTINGS["spring_reallocation"]
     return reallocate_airfoil_centers(
@@ -620,6 +655,107 @@ def _reallocate_with_settings(x, adapt_out):
         transfer_power=spring_cfg["transfer_power"],
         coeff_bounds=SETTINGS["optimization"]["bounds"],
     )
+
+
+def _write_reallocation_diagnostics(workdir, diagnostics, level=None):
+    workdir = Path(workdir)
+    if level is None:
+        write_centers_before_after_csv(workdir / "centers_before_after.csv", diagnostics)
+        write_spring_diagnostics_csv(workdir / "spring_diagnostics.csv", diagnostics)
+        return
+    write_centers_before_after_csv(workdir / f"centers_before_after_level_{int(level):03d}.csv", diagnostics)
+    write_spring_diagnostics_csv(workdir / f"spring_diagnostics_level_{int(level):03d}.csv", diagnostics)
+
+
+def _warn_if_rebase_mismatch(start_eval, reference_err, context):
+    rel = abs(safe_float(start_eval.get("err")) - float(reference_err)) / max(abs(float(reference_err)), 1.0e-16)
+    if rel > 1.0e-3:
+        print(f"[warning] {context} rebase mismatch relative_diff={rel:.6e}")
+
+
+def _run_spring_rebase_reopt(
+    x,
+    adapt_out,
+    cp_target,
+    workdir,
+    label,
+    rebase_label,
+    save_name,
+    diagnostics_level=None,
+    diagnostics_root=None,
+    rebase_start_dir=None,
+    reopt_dir=None,
+    spring_bundle_dir=None,
+):
+    workdir = Path(workdir)
+    diagnostics_root = Path(diagnostics_root) if diagnostics_root is not None else workdir
+    rebase_start_dir = Path(rebase_start_dir) if rebase_start_dir is not None else workdir / "spring_rebase_start"
+    reopt_dir = Path(reopt_dir) if reopt_dir is not None else workdir / "spring_rebase" / "reopt"
+    spring_bundle_dir = Path(spring_bundle_dir) if spring_bundle_dir is not None else workdir / "spring_raw"
+
+    realloc_out = _reallocate_with_settings(x, adapt_out)
+    diagnostics = realloc_out["diagnostics"]
+    new_upper = np.asarray(realloc_out["new_upper_centers"], dtype=float)
+    new_lower = np.asarray(realloc_out["new_lower_centers"], dtype=float)
+    _write_reallocation_diagnostics(diagnostics_root, diagnostics, level=diagnostics_level)
+
+    a0_rebase = np.zeros(len(new_upper) + len(new_lower), dtype=float)
+    start_eval = evaluate_geometry_state(
+        x=x,
+        yu_init=adapt_out["yu_opt"],
+        yl_init=adapt_out["yl_opt"],
+        cp_target=cp_target,
+        upper_centers=new_upper,
+        lower_centers=new_lower,
+        a_vec=a0_rebase,
+        label=rebase_label,
+        workdir=rebase_start_dir,
+        include_aero_calls=True,
+    )
+    _warn_if_rebase_mismatch(start_eval, adapt_out["err_opt"], label)
+
+    spring_out = None
+    try:
+        spring_out = optimize_for_centers(
+            x=x,
+            yu_init=adapt_out["yu_opt"],
+            yl_init=adapt_out["yl_opt"],
+            cp_target=cp_target,
+            upper_centers=new_upper,
+            lower_centers=new_lower,
+            a0=a0_rebase,
+            label=label,
+            current_best_error=float(adapt_out["err_opt"]),
+            workdir=reopt_dir,
+        )
+    except Exception as exc:
+        print(f"[warning] spring reoptimization failed for {label}; keeping reference state.")
+        print(str(exc))
+
+    if spring_out is not None:
+        save_out_bundle(spring_bundle_dir, x=x, out=spring_out, name=save_name)
+
+    accepted = _spring_reopt_succeeded(spring_out, adapt_out["err_opt"])
+    spring_opt_calls = int(spring_out.get("n_optimization_aero_calls_total", 0)) if spring_out is not None else 0
+    spring_fun = int(spring_out.get("n_function_evals", 0)) if spring_out is not None else 0
+    spring_grad = int(spring_out.get("n_gradient_evals", 0)) if spring_out is not None else 0
+    start_calls = int(start_eval.get("aero_calls", 0))
+
+    return {
+        "new_upper": new_upper,
+        "new_lower": new_lower,
+        "diagnostics": diagnostics,
+        "start_eval": start_eval,
+        "spring_out": spring_out,
+        "accepted": bool(accepted),
+        "J_before_spring": safe_float(adapt_out.get("err_opt")),
+        "J_rebase_start": safe_float(start_eval.get("err")),
+        "J_after_spring": safe_float(spring_out.get("err_opt") if spring_out is not None else None),
+        "spring_opt_calls": spring_opt_calls,
+        "spring_function_evals": spring_fun,
+        "spring_gradient_evals": spring_grad,
+        "rebase_start_calls": start_calls,
+    }
 
 
 def run_grad_spring_final_pipeline(
@@ -645,59 +781,23 @@ def run_grad_spring_final_pipeline(
         )
     save_out_bundle(workdir / "adapt_grad", x=x, out=adapt_out, name="ADAPT_GRAD_FOR_SPRING")
 
-    realloc_out = _reallocate_with_settings(x, adapt_out)
-    diagnostics = realloc_out["diagnostics"]
-    new_upper = np.asarray(realloc_out["new_upper_centers"], dtype=float)
-    new_lower = np.asarray(realloc_out["new_lower_centers"], dtype=float)
-    write_centers_before_after_csv(workdir / "centers_before_after.csv", diagnostics)
-    write_spring_diagnostics_csv(workdir / "spring_diagnostics.csv", diagnostics)
-
-    a0_rebase = np.zeros(len(new_upper) + len(new_lower), dtype=float)
-    start_eval = evaluate_geometry_state(
+    spring_result = _run_spring_rebase_reopt(
         x=x,
-        yu_init=adapt_out["yu_opt"],
-        yl_init=adapt_out["yl_opt"],
+        adapt_out=adapt_out,
         cp_target=cp_target,
-        upper_centers=new_upper,
-        lower_centers=new_lower,
-        a_vec=a0_rebase,
-        label="spring_rebase_start",
-        workdir=workdir / "spring_rebase_start",
-        include_aero_calls=True,
+        workdir=workdir,
+        label="grad_spring_final_rebase",
+        rebase_label="spring_rebase_start",
+        save_name="GRAD_SPRING_FINAL_RAW",
+        diagnostics_root=workdir,
+        rebase_start_dir=workdir / "spring_rebase_start",
+        reopt_dir=workdir / "spring_rebase" / "reopt",
+        spring_bundle_dir=workdir / "spring_raw",
     )
-    rel = abs(safe_float(start_eval.get("err")) - float(adapt_out["err_opt"])) / max(abs(float(adapt_out["err_opt"])), 1.0e-16)
-    if rel > 1.0e-3:
-        print(f"[warning] final spring rebase mismatch relative_diff={rel:.6e}")
-
-    spring_out = None
-    try:
-        spring_out = optimize_for_centers(
-            x=x,
-            yu_init=adapt_out["yu_opt"],
-            yl_init=adapt_out["yl_opt"],
-            cp_target=cp_target,
-            upper_centers=new_upper,
-            lower_centers=new_lower,
-            a0=a0_rebase,
-            label="grad_spring_final_rebase",
-            current_best_error=float(adapt_out["err_opt"]),
-            workdir=workdir / "spring_rebase" / "reopt",
-        )
-    except Exception as exc:
-        print("[warning] final spring reoptimization failed; keeping ADAPT_GRAD result.")
-        print(str(exc))
-
-    if spring_out is not None:
-        save_out_bundle(workdir / "spring_raw", x=x, out=spring_out, name="GRAD_SPRING_FINAL_RAW")
-
-    accepted = _spring_reopt_succeeded(spring_out, adapt_out["err_opt"])
+    spring_out = spring_result["spring_out"]
+    accepted = spring_result["accepted"]
     final_out = spring_out if accepted else adapt_out
     save_out_bundle(workdir / "final", x=x, out=final_out, name="GRAD_SPRING_FINAL")
-
-    spring_opt_calls = int(spring_out.get("n_optimization_aero_calls_total", 0)) if spring_out is not None else 0
-    spring_fun = int(spring_out.get("n_function_evals", 0)) if spring_out is not None else 0
-    spring_grad = int(spring_out.get("n_gradient_evals", 0)) if spring_out is not None else 0
-    start_calls = int(start_eval.get("aero_calls", 0))
 
     return {
         "method_name": "GRAD_SPRING_FINAL",
@@ -705,19 +805,24 @@ def run_grad_spring_final_pipeline(
         "adapt_out": adapt_out,
         "spring_out": spring_out,
         "accepted": bool(accepted),
-        "J_before_spring": safe_float(adapt_out.get("err_opt")),
-        "J_rebase_start": safe_float(start_eval.get("err")),
-        "J_after_spring": safe_float(spring_out.get("err_opt") if spring_out is not None else None),
-        "diagnostics": diagnostics,
+        "J_before_spring": spring_result["J_before_spring"],
+        "J_rebase_start": spring_result["J_rebase_start"],
+        "J_after_spring": spring_result["J_after_spring"],
+        "diagnostics": spring_result["diagnostics"],
         "spring_history": [
             ("ADAPT_GRAD", safe_float(adapt_out.get("err_opt"))),
             ("SPRING", safe_float(final_out.get("err_opt"))),
         ],
         "total_scoring_aero_calls": int(adapt_out.get("n_scoring_aero_calls_total", 0)),
-        "total_optimization_aero_calls": int(adapt_out.get("n_optimization_aero_calls_total", 0) + spring_opt_calls),
-        "total_function_evals": int(adapt_out.get("n_function_evals_total", 0) + spring_fun),
-        "total_gradient_evals": int(adapt_out.get("n_gradient_evals_total", 0) + spring_grad),
-        "total_aero_calls": int(adapt_out.get("n_scoring_aero_calls_total", 0) + adapt_out.get("n_optimization_aero_calls_total", 0) + start_calls + spring_opt_calls),
+        "total_optimization_aero_calls": int(adapt_out.get("n_optimization_aero_calls_total", 0) + spring_result["spring_opt_calls"]),
+        "total_function_evals": int(adapt_out.get("n_function_evals_total", 0) + spring_result["spring_function_evals"]),
+        "total_gradient_evals": int(adapt_out.get("n_gradient_evals_total", 0) + spring_result["spring_gradient_evals"]),
+        "total_aero_calls": int(
+            adapt_out.get("n_scoring_aero_calls_total", 0)
+            + adapt_out.get("n_optimization_aero_calls_total", 0)
+            + spring_result["rebase_start_calls"]
+            + spring_result["spring_opt_calls"]
+        ),
     }
 
 
@@ -732,22 +837,14 @@ def run_grad_spring_periodic_pipeline(
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     cfg = SETTINGS["adaptive_spring"]
-    periodic_policy = str(cfg.get("periodic_policy", "levels")).strip().lower()
+    mode, levels = _resolve_adaptive_spring_levels()
     n0 = int(SETTINGS["optimization"]["adaptive"]["n0"])
-    n_final = int(SETTINGS["optimization"]["adaptive"]["n_final"])
-    if periodic_policy == "levels":
-        levels = sorted(int(v) for v in cfg.get("periodic_levels", [12, 16, 20]))
-    elif periodic_policy == "every_refine":
-        levels = list(range(n0 + 1, n_final + 1))
-    else:
-        raise ValueError(
-            f"Unsupported ADAPTIVE_SPRING_PERIODIC_POLICY={periodic_policy!r}. "
-            "Supported policies: ['levels', 'every_refine']."
-        )
+    if mode == "final":
+        raise ValueError("run_grad_spring_periodic_pipeline requires mode 'levels' or 'every_refine'.")
     if not levels:
         raise ValueError("Periodic spring levels must contain at least one level.")
-    print(f"ADAPTIVE_SPRING periodic policy = {periodic_policy}")
-    print(f"periodic spring levels = {levels}")
+    print(f"ADAPTIVE_SPRING mode = {mode}")
+    print(f"adaptive spring levels = {levels}")
     if str(cfg.get("accept_mode_intermediate", "rebase_keep_new_centers")).strip().lower() != "rebase_keep_new_centers":
         raise ValueError("ADAPTIVE_SPRING_ACCEPT_MODE_INTERMEDIATE supports only 'rebase_keep_new_centers'.")
     if str(cfg.get("accept_mode_final", "accept_if_improved")).strip().lower() != "accept_if_improved":
@@ -798,57 +895,33 @@ def run_grad_spring_periodic_pipeline(
         total_function += int(adapt_out.get("n_function_evals_total", 0))
         total_gradient += int(adapt_out.get("n_gradient_evals_total", 0))
 
-        realloc_out = _reallocate_with_settings(x, adapt_out)
-        diagnostics = realloc_out["diagnostics"]
-        new_upper = np.asarray(realloc_out["new_upper_centers"], dtype=float)
-        new_lower = np.asarray(realloc_out["new_lower_centers"], dtype=float)
-        write_centers_before_after_csv(workdir / f"centers_before_after_level_{target_level:03d}.csv", diagnostics)
-        write_spring_diagnostics_csv(workdir / f"spring_diagnostics_level_{target_level:03d}.csv", diagnostics)
-
-        a0_rebase = np.zeros(len(new_upper) + len(new_lower), dtype=float)
         spring_dir = workdir / f"block_{target_level:03d}_spring"
-        start_eval = evaluate_geometry_state(
+        spring_result = _run_spring_rebase_reopt(
             x=x,
-            yu_init=adapt_out["yu_opt"],
-            yl_init=adapt_out["yl_opt"],
+            adapt_out=adapt_out,
             cp_target=cp_target,
-            upper_centers=new_upper,
-            lower_centers=new_lower,
-            a_vec=a0_rebase,
-            label=f"periodic_rebase_start_level_{target_level}",
-            workdir=spring_dir / "rebase_start",
-            include_aero_calls=True,
+            workdir=spring_dir,
+            label=f"periodic_spring_rebase_level_{target_level}",
+            rebase_label=f"periodic_rebase_start_level_{target_level}",
+            save_name=f"GRAD_SPRING_LEVEL_{target_level}",
+            diagnostics_level=target_level,
+            diagnostics_root=workdir,
+            rebase_start_dir=spring_dir / "rebase_start",
+            reopt_dir=spring_dir / "reopt",
+            spring_bundle_dir=spring_dir,
         )
-        total_rebase_start += int(start_eval.get("aero_calls", 0))
-        rel = abs(safe_float(start_eval.get("err")) - float(adapt_out["err_opt"])) / max(abs(float(adapt_out["err_opt"])), 1.0e-16)
-        if rel > 1.0e-3:
-            print(f"[warning] periodic rebase mismatch level={target_level} relative_diff={rel:.6e}")
-
-        spring_out = None
-        try:
-            spring_out = optimize_for_centers(
-                x=x,
-                yu_init=adapt_out["yu_opt"],
-                yl_init=adapt_out["yl_opt"],
-                cp_target=cp_target,
-                upper_centers=new_upper,
-                lower_centers=new_lower,
-                a0=a0_rebase,
-                label=f"periodic_spring_rebase_level_{target_level}",
-                current_best_error=float(adapt_out["err_opt"]),
-                workdir=spring_dir / "reopt",
-            )
-        except Exception as exc:
-            print(f"[warning] periodic spring reoptimization failed at level {target_level}.")
-            print(str(exc))
-        if spring_out is not None:
-            save_out_bundle(spring_dir, x=x, out=spring_out, name=f"PERIODIC_SPRING_{target_level}")
-            total_optimization += int(spring_out.get("n_optimization_aero_calls_total", 0))
-            total_function += int(spring_out.get("n_function_evals", 0))
-            total_gradient += int(spring_out.get("n_gradient_evals", 0))
+        diagnostics = spring_result["diagnostics"]
+        new_upper = spring_result["new_upper"]
+        new_lower = spring_result["new_lower"]
+        start_eval = spring_result["start_eval"]
+        spring_out = spring_result["spring_out"]
+        total_rebase_start += int(spring_result["rebase_start_calls"])
+        total_optimization += int(spring_result["spring_opt_calls"])
+        total_function += int(spring_result["spring_function_evals"])
+        total_gradient += int(spring_result["spring_gradient_evals"])
 
         is_final = target_level == levels[-1]
-        improved = _spring_reopt_succeeded(spring_out, adapt_out["err_opt"])
+        improved = bool(spring_result["accepted"])
         rebase_start_out = _make_rebase_start_out(adapt_out, new_upper, new_lower, start_eval)
         if is_final:
             if improved:

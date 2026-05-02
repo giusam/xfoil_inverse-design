@@ -847,6 +847,7 @@ def run_adaptive_strategy_from_state(
     n_function_evals_total = 0
     n_gradient_evals_total = 0
 
+    level_label = f"adaptive_from_state_level_{len(upper_centers) + len(lower_centers)}"
     adaptive_out = optimize_for_centers(
         x=x,
         yu_init=yu_init,
@@ -855,9 +856,18 @@ def run_adaptive_strategy_from_state(
         upper_centers=upper_centers,
         lower_centers=lower_centers,
         a0=a0,
-        label=f"adaptive_from_state_level_{len(upper_centers) + len(lower_centers)}",
+        label=level_label,
         current_best_error=current_best_error,
         workdir=Path(workdir) / "adaptive",
+    )
+    _save_level_snapshot(
+        x=x,
+        yu_init=yu_init,
+        yl_init=yl_init,
+        cp_target=cp_target,
+        adaptive_out=adaptive_out,
+        label=level_label,
+        workdir=workdir,
     )
 
     current_best_error = adaptive_out["err_opt"]
@@ -1069,6 +1079,15 @@ def run_adaptive_strategy_from_state(
             label=level_label,
             current_best_error=current_best_error,
             workdir=Path(workdir) / "adaptive",
+        )
+        _save_level_snapshot(
+            x=x,
+            yu_init=yu_init,
+            yl_init=yl_init,
+            cp_target=cp_target,
+            adaptive_out=adaptive_out,
+            label=level_label,
+            workdir=workdir,
         )
         current_best_error = adaptive_out["err_opt"]
         n_optimization_aero_calls_total += adaptive_out["n_optimization_aero_calls_total"]

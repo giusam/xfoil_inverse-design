@@ -3,6 +3,12 @@ from pathlib import Path
 
 import numpy as np
 
+"""
+Diagnostic script for isolated spring reallocation experiments.
+The official optimization workflow is main_inverse_static.py.
+Spring restart in this script is always rebase.
+"""
+
 from settings import SETTINGS, apply_cfg_overrides
 from geometry import (
     build_naca0012_surfaces,
@@ -26,10 +32,8 @@ from reporting import print_initial_state, report_initial_aero_failure
 from spring_reallocation import reallocate_airfoil_centers
 
 
-def _start_metric_label(restart_mode):
-    if str(restart_mode).strip().lower() == "rebase":
-        return "Spring rebase start Cp error"
-    return "Spring projected Cp error"
+def _start_metric_label():
+    return "Spring rebase start Cp error"
 
 
 def _maybe_make_plots(cycle_dir, centers_rows, objective_rows):
@@ -83,7 +87,7 @@ def _maybe_make_plots(cycle_dir, centers_rows, objective_rows):
     plt.close(fig)
 
 
-def _write_cycle_outputs(cycle_dir, diagnostics, projected_eval, reopt_out, static_out, restart_mode):
+def _write_cycle_outputs(cycle_dir, diagnostics, projected_eval, reopt_out, static_out):
     cycle_dir = Path(cycle_dir)
     cycle_dir.mkdir(parents=True, exist_ok=True)
 
@@ -149,7 +153,7 @@ def _write_cycle_outputs(cycle_dir, diagnostics, projected_eval, reopt_out, stat
     if projected_eval is not None and projected_eval.get("success", False):
         objective_rows.append(
             {
-                "label": "rebase_start" if str(restart_mode).lower() == "rebase" else "projected_a0",
+                "label": "rebase_start",
                 "objective": float(projected_eval["err"]),
             }
         )
@@ -166,9 +170,9 @@ def _projection_warning(side_name, proj_diag):
         print("#############################################")
 
 
-def _print_cycle_recap(cycle_idx, diagnostics, projected_eval, restart_mode, current_j):
+def _print_cycle_recap(cycle_idx, diagnostics, projected_eval, current_j):
     print(f"\n===== SPRING REALLOCATION CYCLE {cycle_idx} =====")
-    print(f"Restart mode = {restart_mode}")
+    print("Restart mode = rebase")
 
     for side_key, side_name in (("upper", "UPPER"), ("lower", "LOWER")):
         spring_diag = diagnostics[f"{side_key}_spring"]
@@ -188,22 +192,21 @@ def _print_cycle_recap(cycle_idx, diagnostics, projected_eval, restart_mode, cur
     if projected_eval is None:
         return
 
-    start_label = _start_metric_label(restart_mode)
+    start_label = _start_metric_label()
     if projected_eval.get("success", False):
         print(f"{start_label} = {projected_eval['err']:.6e}")
         print(f"Start polar = {projected_eval['res']['polar']}")
-        if str(restart_mode).strip().lower() == "rebase":
-            diff = float(projected_eval["err"]) - float(current_j)
-            rel = diff / max(abs(float(current_j)), 1.0e-16)
-            print("Rebase start should match current optimized geometry.")
-            print(f"Current J = {float(current_j):.6e}")
-            print(f"Rebase start J = {float(projected_eval['err']):.6e}")
-            print(f"Difference = {diff:.6e}")
-            if abs(rel) > 1.0e-3:
-                print("#############################################")
-                print("WARNING: rebase start differs from current optimized geometry")
-                print(f"relative_difference = {rel:.6e}")
-                print("#############################################")
+        diff = float(projected_eval["err"]) - float(current_j)
+        rel = diff / max(abs(float(current_j)), 1.0e-16)
+        print("Rebase start should match current optimized geometry.")
+        print(f"Current J = {float(current_j):.6e}")
+        print(f"Rebase start J = {float(projected_eval['err']):.6e}")
+        print(f"Difference = {diff:.6e}")
+        if abs(rel) > 1.0e-3:
+            print("#############################################")
+            print("WARNING: rebase start differs from current optimized geometry")
+            print(f"relative_difference = {rel:.6e}")
+            print("#############################################")
     else:
         print(f"{start_label} = FAILED_AERO")
         print(projected_eval["res"].get("stdout", ""))
@@ -223,7 +226,7 @@ def _seed_summary_row(seed, cfg, static_out, projected_eval, final_out):
         "seed": int(seed),
         "n_dv": int(cfg["n_dv"]),
         "weight_mode": str(cfg["weight_mode"]),
-        "restart_mode": str(cfg.get("restart_mode", "project")),
+        "restart_mode": "rebase",
         "A": float(cfg["A"]),
         "omega": float(cfg["omega"]),
         "max_dx": float(cfg["max_dx"]),
@@ -254,14 +257,13 @@ def _print_final_recap(
     projected_eval,
     final_out,
     diagnostics,
-    restart_mode,
 ):
     print("\n===== FINAL SPRING REALLOCATION RECAP =====")
-    print(f"Restart mode                      = {restart_mode}")
+    print("Restart mode                      = rebase")
     print(f"Initial Cp error                    = {err_init:.6e}")
     print(f"Static Cp error before reallocation = {static_out['err_opt']:.6e}")
 
-    start_label = _start_metric_label(restart_mode)
+    start_label = _start_metric_label()
     if projected_eval is not None and projected_eval.get("success", False):
         print(f"{start_label:<34} = {projected_eval['err']:.6e}")
     else:
@@ -332,12 +334,6 @@ def main():
         print(f"Loaded CFG overrides from: {sys.argv[1]}")
 
     spring_cfg = SETTINGS["spring_reallocation"]
-    restart_mode = str(spring_cfg.get("restart_mode", "project")).strip().lower()
-    if restart_mode not in {"project", "rebase"}:
-        raise ValueError(
-            f"Invalid spring_reallocation.restart_mode={restart_mode!r}. "
-            "Allowed values: project, rebase."
-        )
     n_dv = int(spring_cfg["n_dv"])
     n_cycles = int(spring_cfg["n_cycles"])
     if n_dv <= 0:
@@ -477,23 +473,15 @@ def main():
             )
 
             last_diagnostics = realloc_out["diagnostics"]
-            if restart_mode == "project":
-                second_yu_init = yu_init
-                second_yl_init = yl_init
-                second_a0 = np.asarray(realloc_out["a0_new"], dtype=float)
-                start_label = f"spring_projected_cycle_{cycle_idx:02d}"
-                reopt_label = f"spring_reopt_cycle_{cycle_idx:02d}"
-                second_current_best_error = min(float(current_out["err_opt"]), float(err_init))
-            else:
-                n_rebase = len(realloc_out["new_upper_centers"]) + len(realloc_out["new_lower_centers"])
-                second_a0 = np.zeros(n_rebase, dtype=float)
-                if second_a0.size != n_rebase:
-                    raise ValueError("Invalid rebase restart state: zero restart vector has wrong size.")
-                second_yu_init = np.asarray(current_out["yu_opt"], dtype=float)
-                second_yl_init = np.asarray(current_out["yl_opt"], dtype=float)
-                start_label = f"spring_rebased_cycle_{cycle_idx:02d}"
-                reopt_label = f"spring_rebase_reopt_cycle_{cycle_idx:02d}"
-                second_current_best_error = float(current_out["err_opt"])
+            n_rebase = len(realloc_out["new_upper_centers"]) + len(realloc_out["new_lower_centers"])
+            second_a0 = np.zeros(n_rebase, dtype=float)
+            if second_a0.size != n_rebase:
+                raise ValueError("Invalid rebase restart state: zero restart vector has wrong size.")
+            second_yu_init = np.asarray(current_out["yu_opt"], dtype=float)
+            second_yl_init = np.asarray(current_out["yl_opt"], dtype=float)
+            start_label = f"spring_rebased_cycle_{cycle_idx:02d}"
+            reopt_label = f"spring_rebase_reopt_cycle_{cycle_idx:02d}"
+            second_current_best_error = float(current_out["err_opt"])
 
             last_projected_eval = evaluate_geometry_state(
                 x=x,
@@ -511,7 +499,6 @@ def main():
                 cycle_idx,
                 last_diagnostics,
                 last_projected_eval,
-                restart_mode=restart_mode,
                 current_j=float(current_out["err_opt"]),
             )
 
@@ -534,7 +521,6 @@ def main():
                 projected_eval=last_projected_eval,
                 reopt_out=reopt_out,
                 static_out=static_out,
-                restart_mode=restart_mode,
             )
 
             current_out = reopt_out
@@ -548,7 +534,6 @@ def main():
             projected_eval=last_projected_eval,
             final_out=current_out,
             diagnostics=last_diagnostics,
-            restart_mode=restart_mode,
         )
 
         summary_row = _seed_summary_row(

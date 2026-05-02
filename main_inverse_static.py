@@ -124,7 +124,10 @@ def run_target_aero(*args, **kwargs):
 
 def _parse_args():
     parser = argparse.ArgumentParser(
-        description="Run static and/or adaptive inverse airfoil optimization.",
+        description=(
+            "Official main for static, adaptive, and adaptive spring inverse airfoil optimization. "
+            "Typical use: python3 main_inverse_static.py case.cfg --seed 2 --out run_name"
+        ),
     )
     parser.add_argument(
         "cfg_path",
@@ -213,16 +216,27 @@ def main(forced_run_settings=None, forced_adaptive_spring_settings=None):
     else:
         seeds_to_run = [int(s) for s in seed_list]
 
-    do_static = bool(SETTINGS.get("run", {}).get("do_static", True))
     run_cfg = SETTINGS.get("run", {})
-    do_grad_method = bool(run_cfg.get("do_adaptive_grad", False))
-    do_spring = bool(run_cfg.get("do_adaptive_spring", False))
-    spring_mode = str(SETTINGS.get("adaptive_spring", {}).get("mode", "final")).strip().lower()
-    adaptive_modes = [m for m in _get_active_adaptive_modes() if m != "GRAD"]
+    do_static = bool(run_cfg.get("do_static", True))
+    do_adaptive_grad = bool(run_cfg.get("do_adaptive_grad", False))
+    do_adaptive_ikkt = bool(run_cfg.get("do_adaptive_ikkt", False))
+    do_adaptive_pred = bool(run_cfg.get("do_adaptive_pred", False))
+    do_adaptive_oracle = bool(run_cfg.get("do_adaptive_oracle", False))
+    spring_cfg = SETTINGS.get("adaptive_spring", {})
+    do_spring = bool(spring_cfg.get("enabled", False))
+    spring_mode = str(spring_cfg.get("mode", "final")).strip().lower()
+    do_grad_method = do_adaptive_grad
+    adaptive_modes = []
+    if do_adaptive_ikkt:
+        adaptive_modes.append("IKKT")
+    if do_adaptive_pred:
+        adaptive_modes.append("PRED")
+    if do_adaptive_oracle:
+        adaptive_modes.append("ORACLE")
 
     if not do_static and not do_grad_method and not do_spring and len(adaptive_modes) == 0:
         raise RuntimeError(
-            "Activate at least one among RUN_DO_STATIC, RUN_DO_ADAPTIVE_GRAD, RUN_DO_ADAPTIVE_SPRING, "
+            "Activate at least one among RUN_DO_STATIC, RUN_DO_ADAPTIVE_GRAD, ADAPTIVE_SPRING_ENABLED, "
             "RUN_DO_ADAPTIVE_IKKT, RUN_DO_ADAPTIVE_PRED, RUN_DO_ADAPTIVE_ORACLE."
         )
     import gc
@@ -365,7 +379,7 @@ def main(forced_run_settings=None, forced_adaptive_spring_settings=None):
             print("Skipped because SETTINGS['run']['do_static'] = False")
             static_out = _static_placeholder(err_init, init_res)
 
-        grad_needed_for_spring_final = do_spring and spring_mode in {"final", "both"}
+        grad_needed_for_spring_final = do_spring and spring_mode == "final"
         grad_out = None
         if do_grad_method or grad_needed_for_spring_final:
             grad_out = run_adaptive_strategy(
@@ -400,7 +414,7 @@ def main(forced_run_settings=None, forced_adaptive_spring_settings=None):
             SETTINGS["optimization"]["adaptive"]["grad_score_mode"] = force_mode
 
         try:
-            if do_spring and spring_mode in {"final", "both"}:
+            if do_spring and spring_mode == "final":
                 spring_adapt_out = grad_out
                 if force_mode and str(old_grad_score_mode).strip().lower() != force_mode:
                     spring_adapt_out = None
@@ -427,7 +441,7 @@ def main(forced_run_settings=None, forced_adaptive_spring_settings=None):
                     extra=final_pipeline,
                 )
 
-            if do_spring and spring_mode in {"periodic", "both"}:
+            if do_spring and spring_mode in {"every_refine", "levels"}:
                 periodic_pipeline = run_grad_spring_periodic_pipeline(
                     x=x,
                     yu_init=yu_init,
