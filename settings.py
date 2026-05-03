@@ -125,6 +125,10 @@ SETTINGS = {
             "gn_schur_reg": 1.0e-10,
             "gn_schur_rcond": 1.0e-10,
             "gn_schur_fd_target_peak_normal": None,
+            "force_candidates_enabled": False,
+            "force_candidates_file": None,
+            "force_candidates_strict": True,
+            "force_candidates_tol": 1.0e-10,
         },
     },
 
@@ -266,6 +270,10 @@ _CFG_KEY_MAP = {
     "ADAPT_GN_SCHUR_REG": ("optimization", "adaptive", "gn_schur_reg"),
     "ADAPT_GN_SCHUR_RCOND": ("optimization", "adaptive", "gn_schur_rcond"),
     "ADAPT_GN_SCHUR_FD_TARGET_PEAK_NORMAL": ("optimization", "adaptive", "gn_schur_fd_target_peak_normal"),
+    "ADAPT_FORCE_CANDIDATES_ENABLED": ("optimization", "adaptive", "force_candidates_enabled"),
+    "ADAPT_FORCE_CANDIDATES_FILE": ("optimization", "adaptive", "force_candidates_file"),
+    "ADAPT_FORCE_CANDIDATES_STRICT": ("optimization", "adaptive", "force_candidates_strict"),
+    "ADAPT_FORCE_CANDIDATES_TOL": ("optimization", "adaptive", "force_candidates_tol"),
 
     # ---------------------------
     # adaptive_spring
@@ -404,6 +412,26 @@ def validate_settings():
             f"Supported modes: {supported_score_modes}."
         )
     SETTINGS["optimization"]["adaptive"]["grad_score_mode"] = score_mode
+
+    force_enabled = adapt_cfg.get("force_candidates_enabled", False)
+    if not isinstance(force_enabled, bool):
+        raise ValueError("ADAPT_FORCE_CANDIDATES_ENABLED must be boolean.")
+    adapt_cfg["force_candidates_enabled"] = force_enabled
+
+    force_file = adapt_cfg.get("force_candidates_file", None)
+    if force_file is not None and not isinstance(force_file, str):
+        raise ValueError("ADAPT_FORCE_CANDIDATES_FILE must be None or a string path.")
+    adapt_cfg["force_candidates_file"] = force_file
+
+    force_strict = adapt_cfg.get("force_candidates_strict", True)
+    if not isinstance(force_strict, bool):
+        raise ValueError("ADAPT_FORCE_CANDIDATES_STRICT must be boolean.")
+    adapt_cfg["force_candidates_strict"] = force_strict
+
+    force_tol = float(adapt_cfg.get("force_candidates_tol", 1.0e-10))
+    if force_tol <= 0.0:
+        raise ValueError("ADAPT_FORCE_CANDIDATES_TOL must be > 0.")
+    adapt_cfg["force_candidates_tol"] = force_tol
 
     adaptive_spring = SETTINGS.setdefault("adaptive_spring", {})
     mode = str(adaptive_spring.get("mode", "final")).strip().lower()
