@@ -160,110 +160,12 @@ def reduce_to_best_candidate_per_interval(scored_candidates):
 
 def _format_selected_candidate_summary(indicator, candidate):
     interval_label = candidate.get("interval_label", candidate.get("interval_id", "?"))
-    rank = candidate.get("rank_current", candidate.get("rank", None))
-    rank_part = "" if rank is None else f" rank={int(rank)}"
     return (
         f"[{str(indicator).upper()}] interval={interval_label} "
         f"winner_fraction={float(candidate.get('local_fraction', 0.5)):.2f} "
         f"center={float(candidate['x']):.6f} "
         f"score={float(candidate['score']):.6e}"
-        f"{rank_part}"
     )
-
-
-def _candidate_selection_payload(candidates):
-    return [
-        {
-            "side": cand["side"],
-            "interval_id": int(cand["interval_id"]),
-            "interval_label": str(cand.get("interval_label", cand["interval_id"])),
-            "x_left": float(cand["x_left"]),
-            "x_right": float(cand["x_right"]),
-            "local_fraction": float(cand.get("local_fraction", 0.5)),
-            "center": float(cand["x"]),
-            "score": float(cand["score"]),
-            "rank": int(cand.get("rank_current", cand.get("rank", 0))),
-        }
-        for cand in candidates
-    ]
-
-
-def _load_forced_candidates(path):
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Forced adaptive candidate CSV not found: {path}")
-
-    forced = {}
-    with open(path, "r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        required = {"ndv_before", "side", "center"}
-        missing = required - set(reader.fieldnames or [])
-        if missing:
-            raise ValueError(
-                f"Forced adaptive candidate CSV {path} missing required columns: {sorted(missing)}"
-            )
-
-        for lineno, row in enumerate(reader, start=2):
-            try:
-                ndv_before = int(row["ndv_before"])
-                side = str(row["side"]).strip().upper()
-                center = float(row["center"])
-            except Exception as exc:
-                raise ValueError(f"Invalid forced candidate at {path}:{lineno}: {row}") from exc
-
-            if side not in {"UPPER", "LOWER"}:
-                raise ValueError(f"Invalid forced candidate side at {path}:{lineno}: {side!r}")
-
-            item = {
-                "side": side,
-                "center": center,
-            }
-            if row.get("interval_id", "") not in ("", None):
-                item["interval_id"] = int(row["interval_id"])
-            if row.get("fraction", "") not in ("", None):
-                item["fraction"] = float(row["fraction"])
-            if row.get("note", "") not in ("", None):
-                item["note"] = row["note"]
-
-            forced.setdefault(ndv_before, []).append(item)
-
-    return forced
-
-
-def _select_forced_candidates(scored, forced_rows, tol, strict):
-    chosen = []
-    used = set()
-
-    for forced in forced_rows:
-        forced_side = str(forced["side"]).strip().upper()
-        forced_center = float(forced["center"])
-        found_idx = None
-        found_item = None
-
-        for idx, item in enumerate(scored):
-            if idx in used:
-                continue
-            if str(item["side"]).strip().upper() != forced_side:
-                continue
-            if abs(float(item["x"]) - forced_center) <= float(tol):
-                found_idx = idx
-                found_item = item
-                break
-
-        if found_item is None:
-            msg = (
-                "Forced adaptive candidate not found in scored candidates: "
-                f"side={forced_side} center={forced_center:.12g} tol={float(tol):.3e}"
-            )
-            if strict:
-                raise ValueError(msg)
-            print(f"[warning] {msg}; falling back to normal candidate ranking.")
-            return None
-
-        used.add(found_idx)
-        chosen.append(found_item)
-
-    return chosen
 
 
 def _write_candidate_score_csv(workdir, level, ndv_current, scored_candidates):
@@ -290,6 +192,9 @@ def _write_candidate_score_csv(workdir, level, ndv_current, scored_candidates):
         "interval_left",
         "interval_right",
         "fraction",
+        "interval_width",
+        "n_samples_for_interval",
+        "sampling_fallback_midpoint",
         "score_mode",
         "score",
         "g_norm",
@@ -319,6 +224,9 @@ def _write_candidate_score_csv(workdir, level, ndv_current, scored_candidates):
                 "interval_left": float(item.get("x_left", np.nan)),
                 "interval_right": float(item.get("x_right", np.nan)),
                 "fraction": float(item.get("local_fraction", np.nan)),
+                "interval_width": float(item.get("interval_width", np.nan)),
+                "n_samples_for_interval": int(item.get("n_samples_for_interval", 0)),
+                "sampling_fallback_midpoint": bool(item.get("sampling_fallback_midpoint", False)),
                 "score_mode": item.get("score_mode", ""),
                 "score": float(item.get("score", np.nan)),
                 "g_norm": float(item.get("g_norm", np.nan)),
@@ -665,6 +573,9 @@ def _run_adaptive_strategy_legacy_unused(
                     "x_left": float(cand["x_left"]),
                     "x_right": float(cand["x_right"]),
                     "local_fraction": float(cand.get("local_fraction", 0.5)),
+                    "interval_width": float(cand.get("interval_width", np.nan)),
+                    "n_samples_for_interval": int(cand.get("n_samples_for_interval", 0)),
+                    "sampling_fallback_midpoint": bool(cand.get("sampling_fallback_midpoint", False)),
                     "score": info["score"],
                     "component": info["component"],
                     "raw_grad": info["raw_grad"],
@@ -925,21 +836,6 @@ def run_adaptive_strategy_from_state(
             )
         print(f"ADAPT_GRAD score mode = {grad_score_mode}")
 
-    force_candidates_enabled = bool(opt_ad.get("force_candidates_enabled", False))
-    force_candidates_file = opt_ad.get("force_candidates_file", None)
-    force_candidates_strict = bool(opt_ad.get("force_candidates_strict", True))
-    force_candidates_tol = float(opt_ad.get("force_candidates_tol", 1.0e-10))
-    forced_map = {}
-    forced_file_resolved = None
-    if force_candidates_enabled:
-        if force_candidates_file is None:
-            raise ValueError("ADAPT_FORCE_CANDIDATES_ENABLED=YES requires ADAPT_FORCE_CANDIDATES_FILE.")
-        forced_file_resolved = Path(str(force_candidates_file))
-        if not forced_file_resolved.is_absolute():
-            forced_file_resolved = Path.cwd() / forced_file_resolved
-        forced_map = _load_forced_candidates(forced_file_resolved)
-        print(f"Forced adaptive candidates loaded from: {forced_file_resolved}")
-
     upper_centers = sorted(float(v) for v in initial_upper_centers)
     lower_centers = sorted(float(v) for v in initial_lower_centers)
     a0 = np.asarray(initial_a0, dtype=float)
@@ -1085,6 +981,9 @@ def run_adaptive_strategy_from_state(
                     "x_left": float(cand["x_left"]),
                     "x_right": float(cand["x_right"]),
                     "local_fraction": float(cand.get("local_fraction", 0.5)),
+                    "interval_width": float(cand.get("interval_width", np.nan)),
+                    "n_samples_for_interval": int(cand.get("n_samples_for_interval", 0)),
+                    "sampling_fallback_midpoint": bool(cand.get("sampling_fallback_midpoint", False)),
                     "score": info["score"],
                     "component": info["component"],
                     "raw_grad": info["raw_grad"],
@@ -1121,8 +1020,6 @@ def run_adaptive_strategy_from_state(
 
         scored = reduce_to_best_candidate_per_interval(scored_local)
         scored.sort(key=lambda item: (-item["score"], item["x"]))
-        for rank_idx, item in enumerate(scored, start=1):
-            item["rank_current"] = int(rank_idx)
         _print_candidate_diagnostics(scored, topk=12)
 
         if str(SETTINGS.get("aero", {}).get("backend", "xfoil")).strip().lower() == "cmplxfoil":
@@ -1134,71 +1031,11 @@ def run_adaptive_strategy_from_state(
         if n_add <= 0:
             break
 
-        normal_chosen = scored[:n_add]
-        forced_this_level = False
-        forced_selected = []
-
-        if force_candidates_enabled and current_ndv in forced_map:
-            forced_rows = forced_map[current_ndv]
-            if len(forced_rows) < n_add and force_candidates_strict:
-                raise ValueError(
-                    f"Forced adaptive candidate CSV has {len(forced_rows)} rows for ndv_before={current_ndv}, "
-                    f"but n_add={n_add}. Add rows or set ADAPT_FORCE_CANDIDATES_STRICT=NO."
-                )
-
-            forced_selected = _select_forced_candidates(
-                scored=scored,
-                forced_rows=forced_rows,
-                tol=force_candidates_tol,
-                strict=force_candidates_strict,
-            )
-            if forced_selected is None:
-                chosen = list(normal_chosen)
-            else:
-                forced_this_level = True
-                chosen = list(forced_selected)
-                if len(chosen) < n_add:
-                    print(
-                        "[warning] Forced adaptive candidate CSV has fewer rows than n_add "
-                        f"for ndv_before={current_ndv}; completing from normal ranking."
-                    )
-                    chosen_keys = {(str(c["side"]).upper(), round(float(c["x"]), 12)) for c in chosen}
-                    for cand in scored:
-                        key = (str(cand["side"]).upper(), round(float(cand["x"]), 12))
-                        if key in chosen_keys:
-                            continue
-                        chosen.append(cand)
-                        chosen_keys.add(key)
-                        if len(chosen) >= n_add:
-                            break
-                if len(chosen) > n_remaining:
-                    chosen = chosen[:n_remaining]
-
-                print("===== FORCED ADAPTIVE CANDIDATES =====")
-                print(f"current ndv = {current_ndv}")
-                print(f"forced file = {forced_file_resolved}")
-                print("normal chosen would have been:")
-                for cand in normal_chosen:
-                    print(f"  {_format_selected_candidate_summary(indicator, cand)}")
-                print("forced chosen:")
-                for cand in chosen:
-                    print(f"  {_format_selected_candidate_summary(indicator, cand)}")
-        elif force_candidates_enabled:
-            msg = f"No forced adaptive candidate rows for ndv_before={current_ndv}."
-            if force_candidates_strict:
-                raise ValueError(msg)
-            print(f"[warning] {msg} Falling back to normal candidate ranking.")
-            chosen = list(normal_chosen)
-        else:
-            chosen = list(normal_chosen)
-
+        chosen = scored[:n_add]
         print("===== ADAPTIVE REFINE FROM STATE =====")
         print(f"current ndv       = {current_ndv}")
         print(f"target ndv        = {n_final}")
         print(f"current best err  = {current_best_error:.6e}")
-        print(f"forced            = {'YES' if forced_this_level else 'NO'}")
-        if len(normal_chosen) > 0:
-            print(f"normal top1       = {_format_selected_candidate_summary(indicator, normal_chosen[0])}")
         print("chosen candidates =")
         for cand in chosen:
             print(f"  {_format_selected_candidate_summary(indicator, cand)}")
@@ -1217,11 +1054,19 @@ def run_adaptive_strategy_from_state(
             {
                 "ndv_before": current_ndv,
                 "indicator": indicator_u,
-                "selected_candidates": _candidate_selection_payload(chosen),
-                "forced_candidates_enabled": bool(force_candidates_enabled),
-                "normal_selected_candidates": _candidate_selection_payload(normal_chosen),
-                "forced_selected_candidates": _candidate_selection_payload(chosen) if forced_this_level else [],
-                "forced_candidate_file": str(forced_file_resolved) if forced_file_resolved is not None else "",
+                "selected_candidates": [
+                    {
+                        "side": cand["side"],
+                        "interval_id": int(cand["interval_id"]),
+                        "interval_label": str(cand.get("interval_label", cand["interval_id"])),
+                        "x_left": float(cand["x_left"]),
+                        "x_right": float(cand["x_right"]),
+                        "local_fraction": float(cand.get("local_fraction", 0.5)),
+                        "center": float(cand["x"]),
+                        "score": float(cand["score"]),
+                    }
+                    for cand in chosen
+                ],
             }
         )
 

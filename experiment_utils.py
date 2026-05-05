@@ -98,8 +98,10 @@ def build_grad_history_curve(adapt_out, initial_error=None, x_offset=0.0, includ
     history_full_opt = adapt_out.get("history_full_opt", []) if isinstance(adapt_out, dict) else []
     offset_start = 0.0
     if history_full_opt:
-        for level in history_full_opt:
+        n_levels = len(history_full_opt)
+        for level_idx, level in enumerate(history_full_opt):
             ndv = level.get("ndv_total")
+            last_point = None
             for item in level.get("gradient_eval_history", []):
                 if item.get("status") != "OK":
                     continue
@@ -117,17 +119,24 @@ def build_grad_history_curve(adapt_out, initial_error=None, x_offset=0.0, includ
                     stage="adapt",
                     label=f"ndv={ndv}" if ndv not in (None, "") else "adapt",
                 )
+                last_point = {
+                    "x": float(x_offset + offset_start + local_x),
+                    "J": float(jval),
+                }
 
             level_end = safe_float(level.get("gradient_eval_offset_end", offset_start))
             if not np.isfinite(level_end):
                 level_end = offset_start
             x_event = x_offset + level_end
+            is_refine_marker = level_idx < n_levels - 1
             events.append(
                 {
                     "x": float(x_event),
+                    "J": float(last_point["J"]) if last_point is not None else float("nan"),
                     "ndv": int(ndv) if ndv is not None and np.isfinite(safe_float(ndv)) else "",
                     "stage": "level",
                     "label": f"ndv={int(ndv)}" if ndv is not None and np.isfinite(safe_float(ndv)) else "level",
+                    "is_refine_marker": bool(is_refine_marker and last_point is not None),
                 }
             )
             offset_start = level_end
@@ -137,13 +146,23 @@ def build_grad_history_curve(adapt_out, initial_error=None, x_offset=0.0, includ
     if history:
         print("[warning] detailed gradient history missing; using compact adaptive history fallback.")
         xs = adapt_out.get("history_gradient_evals", [])
+        n_levels = len(history)
         for idx, item in enumerate(history):
             ndv, err = item[0], item[1]
             xval = safe_float(xs[idx]) if idx < len(xs) else float(idx + 1)
             if not np.isfinite(xval):
                 xval = float(idx + 1)
             _append_curve_point(curve, x_offset + xval, err, ndv=ndv, stage="adapt", label=f"ndv={ndv}")
-            events.append({"x": float(x_offset + xval), "ndv": int(ndv), "stage": "level", "label": f"ndv={int(ndv)}"})
+            events.append(
+                {
+                    "x": float(x_offset + xval),
+                    "J": safe_float(err),
+                    "ndv": int(ndv),
+                    "stage": "level",
+                    "label": f"ndv={int(ndv)}",
+                    "is_refine_marker": bool(idx < n_levels - 1),
+                }
+            )
     return curve, events
 
 
@@ -403,6 +422,170 @@ def save_out_bundle(bundle_dir, x, out, name):
             f.write(f"lower_centers = {format_array(out['lower_centers'])}\n")
         if "a_opt" in out:
             f.write(f"a_opt = {format_array(out['a_opt'])}\n")
+
+
+def _csv_safe_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, bool, np.integer, np.floating, np.bool_)):
+        return value
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return _csv_safe_value(value.item())
+        if value.size <= 8:
+            return np.array2string(value, precision=6, separator=", ")
+        return f"<ndarray shape={value.shape} dtype={value.dtype}>"
+    if isinstance(value, (list, tuple)):
+        if len(value) <= 8 and all(isinstance(v, (str, int, float, bool, type(None), np.integer, np.floating, np.bool_)) for v in value):
+            return repr(list(value))
+        return f"<{type(value).__name__} len={len(value)}>"
+    if isinstance(value, dict):
+        scalar = {
+            k: v
+            for k, v in value.items()
+            if isinstance(v, (str, int, float, bool, type(None), np.integer, np.floating, np.bool_))
+        }
+        return repr(scalar) if scalar else f"<dict keys={list(value.keys())}>"
+    return str(value)
+
+
+def _write_dict_rows_csv(path, rows):
+    rows = list(rows or [])
+    if not rows:
+        return None
+    fieldnames = sorted({key for row in rows if isinstance(row, dict) for key in row.keys()})
+    if not fieldnames:
+        return None
+    safe_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        safe_rows.append({key: _csv_safe_value(row.get(key, "")) for key in fieldnames})
+    if not safe_rows:
+        return None
+    write_csv(path, fieldnames, safe_rows)
+    return path
+
+
+def _write_tuple_history_csv(path, rows):
+    out_rows = []
+    for idx, item in enumerate(rows or []):
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            out_rows.append({"index": idx, "ndv_total": item[0], "objective": item[1]})
+        else:
+            out_rows.append({"index": idx, "value": _csv_safe_value(item)})
+    return _write_dict_rows_csv(path, out_rows)
+
+
+def write_history_csvs(bundle_dir, out, prefix=""):
+    bundle_dir = Path(bundle_dir)
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    if not isinstance(out, dict):
+        return []
+
+    written = []
+
+    def _record(path):
+        if path is not None:
+            written.append(path)
+
+    for key in ("function_eval_history", "gradient_eval_history", "objective_history"):
+        _record(_write_dict_rows_csv(bundle_dir / f"{prefix}{key}.csv", out.get(key, [])))
+
+    if out.get("history"):
+        _record(_write_tuple_history_csv(bundle_dir / f"{prefix}history.csv", out.get("history", [])))
+
+    history_full_opt_rows = []
+    history_full_opt_nested = {
+        "function_eval_history": [],
+        "gradient_eval_history": [],
+    }
+    for level_idx, level in enumerate(out.get("history_full_opt", []) or []):
+        if not isinstance(level, dict):
+            continue
+        row = {"level_index": level_idx}
+        for key, value in level.items():
+            if key not in {"function_eval_history", "gradient_eval_history"}:
+                row[key] = value
+        history_full_opt_rows.append(row)
+        for nested_key in ("function_eval_history", "gradient_eval_history"):
+            nested = level.get(nested_key, [])
+            for item in nested:
+                if isinstance(item, dict):
+                    nested_row = dict(item)
+                    nested_row["level_index"] = level_idx
+                    nested_row["ndv_total"] = level.get("ndv_total", "")
+                    history_full_opt_nested[nested_key].append(nested_row)
+    _record(_write_dict_rows_csv(bundle_dir / f"{prefix}history_full_opt.csv", history_full_opt_rows))
+    for nested_key, rows in history_full_opt_nested.items():
+        _record(_write_dict_rows_csv(bundle_dir / f"{prefix}history_full_opt_{nested_key}.csv", rows))
+
+    history_full_rows = []
+    history_full_objective_rows = []
+    for level_idx, level in enumerate(out.get("history_full", []) or []):
+        if not isinstance(level, dict):
+            continue
+        row = {"level_index": level_idx}
+        for key, value in level.items():
+            if key != "objective_history":
+                row[key] = value
+        history_full_rows.append(row)
+        for item in level.get("objective_history", []) or []:
+            if isinstance(item, dict):
+                nested_row = dict(item)
+                nested_row["level_index"] = level_idx
+                nested_row["ndv_total"] = level.get("ndv_total", "")
+                history_full_objective_rows.append(nested_row)
+    _record(_write_dict_rows_csv(bundle_dir / f"{prefix}history_full.csv", history_full_rows))
+    _record(_write_dict_rows_csv(bundle_dir / f"{prefix}history_full_objective_history.csv", history_full_objective_rows))
+
+    for block_idx, block in enumerate(out.get("blocks", []) or []):
+        if not isinstance(block, dict):
+            continue
+        block_dir = bundle_dir / "blocks" / f"block_{block_idx:03d}"
+        for key in ("adapt_out", "spring_out", "rebase_start_out", "final_out", "state_for_next"):
+            if isinstance(block.get(key), dict):
+                written.extend(write_history_csvs(block_dir, block[key], prefix=f"{key}_"))
+
+    return written
+
+
+_HEAVY_HISTORY_KEYS = (
+    "history_full_opt",
+    "history_full",
+    "gradient_eval_history",
+    "function_eval_history",
+    "objective_history",
+)
+
+
+def strip_heavy_histories(obj):
+    if not isinstance(obj, dict):
+        return obj
+
+    for key in _HEAVY_HISTORY_KEYS:
+        if key in obj:
+            obj[key] = []
+
+    if "history" in obj and "history_curve" in obj:
+        obj["history"] = []
+
+    for block in obj.get("blocks", []) or []:
+        if not isinstance(block, dict):
+            continue
+        for nested_key in ("adapt_out", "spring_out", "rebase_start_out", "final_out", "state_for_next"):
+            if isinstance(block.get(nested_key), dict):
+                strip_heavy_histories(block[nested_key])
+
+    for nested_key in ("adapt_out", "spring_out", "final_out"):
+        if isinstance(obj.get(nested_key), dict):
+            strip_heavy_histories(obj[nested_key])
+
+    return obj
+
+
+def compact_method_bundle_for_memory(bundle):
+    return strip_heavy_histories(bundle)
 
 
 def evaluate_geometry_state(
@@ -1054,6 +1237,13 @@ def make_method_result_bundle(method_name, seed, x, yu_init, yl_init, cp_target,
             curve, events = [], []
         bundle["history_curve"] = curve
         bundle["history_events"] = events
+
+    memory_cfg = SETTINGS.get("memory", {})
+    history_dir = Path(workdir) / "history_csv"
+    if bool(memory_cfg.get("write_history_csv", True)):
+        write_history_csvs(history_dir, bundle)
+    if bool(memory_cfg.get("light_history", True)):
+        compact_method_bundle_for_memory(bundle)
     return bundle
 
 

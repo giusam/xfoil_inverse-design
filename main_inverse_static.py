@@ -507,6 +507,8 @@ def main(forced_run_settings=None, forced_adaptive_spring_settings=None):
             cp_init=cp_init,
             output_dir=Path(workdir) / "plots",
         )
+        clear_cmplxfoil_solver_cache()
+        gc.collect()
 
         summary_row = build_method_summary_row(seed=seed, err_init=err_init, method_results=method_results)
         summary_fields = method_summary_fields([summary_row])

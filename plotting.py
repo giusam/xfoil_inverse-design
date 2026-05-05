@@ -765,12 +765,39 @@ def _extract_history_events(bundle):
         events.append(
             {
                 "x": x,
+                "J": _valid_error_value(item.get("J")),
                 "ndv": item.get("ndv", ""),
                 "stage": item.get("stage", ""),
                 "label": item.get("label", ""),
+                "is_refine_marker": bool(item.get("is_refine_marker", False)),
             }
         )
     return events
+
+
+def _refine_marker_points(curve, events):
+    xs = []
+    ys = []
+    if not curve:
+        return xs, ys
+
+    curve_x = np.asarray([p["x"] for p in curve], dtype=float)
+    curve_y = np.asarray([p["J"] for p in curve], dtype=float)
+
+    for event in events:
+        if not bool(event.get("is_refine_marker", False)):
+            continue
+        x = float(event["x"])
+        y = event.get("J")
+        if y is None:
+            idx = int(np.argmin(np.abs(curve_x - x)))
+            y = float(curve_y[idx])
+            x = float(curve_x[idx])
+        if y is None or not np.isfinite(float(y)) or float(y) <= 0.0:
+            continue
+        xs.append(float(x))
+        ys.append(float(y))
+    return xs, ys
 
 
 def _draw_history_events(ax, events, show_labels=True):
@@ -824,6 +851,9 @@ def plot_single_method_history(bundle, savepath):
         xs = np.asarray([p["x"] for p in curve], dtype=float)
         ys = np.asarray([p["J"] for p in curve], dtype=float)
         ax.plot(xs, ys, "-", lw=2.0, color="tab:blue", label=label)
+        refine_x, refine_y = _refine_marker_points(curve, events)
+        if refine_x:
+            ax.scatter(refine_x, refine_y, marker="D", s=42, color="tab:blue", zorder=4, label="refine")
         spring_x = [p["x"] for p in curve if p.get("stage") == "spring"]
         spring_y = [p["J"] for p in curve if p.get("stage") == "spring"]
         if spring_x:
@@ -924,6 +954,19 @@ def plot_history_comparison(method_results, savepath):
                     color=style["color"],
                     alpha=style["alpha"],
                     zorder=style["zorder"] + 1,
+                )
+            events = _extract_history_events(bundle)
+            refine_x, refine_y = _refine_marker_points(curve, events)
+            if name == "ADAPT_GRAD" and refine_x:
+                ax.scatter(
+                    refine_x,
+                    refine_y,
+                    marker="D",
+                    s=42,
+                    color=style["color"],
+                    alpha=style["alpha"],
+                    zorder=style["zorder"] + 2,
+                    label="refine",
                 )
             any_series = True
         elif name == "STATIC":

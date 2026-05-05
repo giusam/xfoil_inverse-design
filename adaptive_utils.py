@@ -83,14 +83,35 @@ def build_interval_candidates(centers, side=None, sampling_mode=None, sampling_f
 
     if sampling_mode is None or sampling_fractions is None:
         sampling_mode, sampling_fractions = get_interval_sampling_spec()
+    sampling_mode = str(sampling_mode).strip().lower()
 
     candidates = []
     for interval in intervals:
         x_left = float(interval["x_left"])
         x_right = float(interval["x_right"])
         dx = x_right - x_left
+        sampling_fallback_midpoint = False
 
-        for frac in sampling_fractions:
+        if sampling_mode == "midpoint":
+            fractions_for_interval = (0.5,)
+        elif sampling_mode == "best_of_3":
+            threshold = SETTINGS["optimization"]["adaptive"].get(
+                "interval_multi_sample_min_width",
+                None,
+            )
+            if threshold is not None and float(threshold) > 0.0 and dx < float(threshold):
+                fractions_for_interval = (0.5,)
+                sampling_fallback_midpoint = True
+            else:
+                fractions_for_interval = sampling_fractions
+        else:
+            allowed = ", ".join(sorted(_VALID_INTERVAL_SAMPLING_MODES))
+            raise ValueError(
+                f"Invalid optimization.adaptive.interval_sampling_mode={sampling_mode!r}. "
+                f"Allowed values: {allowed}."
+            )
+
+        for frac in fractions_for_interval:
             xc = x_left + float(frac) * dx
             if len(centers) > 0 and np.min(np.abs(centers - xc)) <= 1.0e-12:
                 continue
@@ -101,6 +122,9 @@ def build_interval_candidates(centers, side=None, sampling_mode=None, sampling_f
                     "x": float(xc),
                     "local_fraction": float(frac),
                     "sampling_mode": str(sampling_mode),
+                    "interval_width": float(dx),
+                    "n_samples_for_interval": int(len(fractions_for_interval)),
+                    "sampling_fallback_midpoint": bool(sampling_fallback_midpoint),
                 }
             )
             candidates.append(candidate)

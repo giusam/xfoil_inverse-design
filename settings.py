@@ -125,11 +125,13 @@ SETTINGS = {
             "gn_schur_reg": 1.0e-10,
             "gn_schur_rcond": 1.0e-10,
             "gn_schur_fd_target_peak_normal": None,
-            "force_candidates_enabled": False,
-            "force_candidates_file": None,
-            "force_candidates_strict": True,
-            "force_candidates_tol": 1.0e-10,
+            "interval_multi_sample_min_width": None,
         },
+    },
+
+    "memory": {
+        "light_history": True,
+        "write_history_csv": True,
     },
 
     "spring_reallocation": {
@@ -265,15 +267,18 @@ _CFG_KEY_MAP = {
     "ADAPT_XMAX": ("optimization", "adaptive", "xmax"),
     "ADAPT_INTERVAL_SAMPLING_MODE": ("optimization", "adaptive", "interval_sampling_mode"),
     "ADAPT_INTERVAL_SAMPLING_FRACTIONS": ("optimization", "adaptive", "interval_sampling_fractions"),
+    "ADAPT_INTERVAL_MULTI_SAMPLE_MIN_WIDTH": ("optimization", "adaptive", "interval_multi_sample_min_width"),
     "ADAPT_GRAD_SCORE_MODE": ("optimization", "adaptive", "grad_score_mode"),
     "ADAPT_WRITE_CANDIDATE_SCORE_CSV": ("optimization", "adaptive", "write_candidate_score_csv"),
     "ADAPT_GN_SCHUR_REG": ("optimization", "adaptive", "gn_schur_reg"),
     "ADAPT_GN_SCHUR_RCOND": ("optimization", "adaptive", "gn_schur_rcond"),
     "ADAPT_GN_SCHUR_FD_TARGET_PEAK_NORMAL": ("optimization", "adaptive", "gn_schur_fd_target_peak_normal"),
-    "ADAPT_FORCE_CANDIDATES_ENABLED": ("optimization", "adaptive", "force_candidates_enabled"),
-    "ADAPT_FORCE_CANDIDATES_FILE": ("optimization", "adaptive", "force_candidates_file"),
-    "ADAPT_FORCE_CANDIDATES_STRICT": ("optimization", "adaptive", "force_candidates_strict"),
-    "ADAPT_FORCE_CANDIDATES_TOL": ("optimization", "adaptive", "force_candidates_tol"),
+
+    # ---------------------------
+    # memory
+    # ---------------------------
+    "RUN_MEMORY_LIGHT_HISTORY": ("memory", "light_history"),
+    "RUN_WRITE_HISTORY_CSV": ("memory", "write_history_csv"),
 
     # ---------------------------
     # adaptive_spring
@@ -413,25 +418,24 @@ def validate_settings():
         )
     SETTINGS["optimization"]["adaptive"]["grad_score_mode"] = score_mode
 
-    force_enabled = adapt_cfg.get("force_candidates_enabled", False)
-    if not isinstance(force_enabled, bool):
-        raise ValueError("ADAPT_FORCE_CANDIDATES_ENABLED must be boolean.")
-    adapt_cfg["force_candidates_enabled"] = force_enabled
+    multi_sample_min_width = adapt_cfg.get("interval_multi_sample_min_width", None)
+    if multi_sample_min_width is None:
+        adapt_cfg["interval_multi_sample_min_width"] = None
+    else:
+        multi_sample_min_width = float(multi_sample_min_width)
+        if multi_sample_min_width < 0.0:
+            raise ValueError("ADAPT_INTERVAL_MULTI_SAMPLE_MIN_WIDTH must be None or >= 0.")
+        adapt_cfg["interval_multi_sample_min_width"] = multi_sample_min_width
 
-    force_file = adapt_cfg.get("force_candidates_file", None)
-    if force_file is not None and not isinstance(force_file, str):
-        raise ValueError("ADAPT_FORCE_CANDIDATES_FILE must be None or a string path.")
-    adapt_cfg["force_candidates_file"] = force_file
-
-    force_strict = adapt_cfg.get("force_candidates_strict", True)
-    if not isinstance(force_strict, bool):
-        raise ValueError("ADAPT_FORCE_CANDIDATES_STRICT must be boolean.")
-    adapt_cfg["force_candidates_strict"] = force_strict
-
-    force_tol = float(adapt_cfg.get("force_candidates_tol", 1.0e-10))
-    if force_tol <= 0.0:
-        raise ValueError("ADAPT_FORCE_CANDIDATES_TOL must be > 0.")
-    adapt_cfg["force_candidates_tol"] = force_tol
+    memory_cfg = SETTINGS.setdefault("memory", {})
+    light_history = memory_cfg.get("light_history", True)
+    write_history_csv = memory_cfg.get("write_history_csv", True)
+    if not isinstance(light_history, bool):
+        raise ValueError("RUN_MEMORY_LIGHT_HISTORY must be boolean.")
+    if not isinstance(write_history_csv, bool):
+        raise ValueError("RUN_WRITE_HISTORY_CSV must be boolean.")
+    memory_cfg["light_history"] = light_history
+    memory_cfg["write_history_csv"] = write_history_csv
 
     adaptive_spring = SETTINGS.setdefault("adaptive_spring", {})
     mode = str(adaptive_spring.get("mode", "final")).strip().lower()
