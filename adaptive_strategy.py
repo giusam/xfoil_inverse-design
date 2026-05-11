@@ -168,6 +168,46 @@ def _format_selected_candidate_summary(indicator, candidate):
     )
 
 
+def _make_adaptive_trigger_options(current_ndv, n_final, level_label):
+    adapt_cfg = SETTINGS["optimization"]["adaptive"]
+    is_final_level = int(current_ndv) >= int(n_final)
+    enabled = bool(adapt_cfg.get("trigger_enabled", False))
+
+    print("ADAPTIVE TRIGGER enabled = " + ("YES" if enabled else "NO"))
+    print(f"mode = {str(adapt_cfg.get('trigger_mode', 'slope_efficiency')).strip().lower()}")
+    print(f"current_ndv = {int(current_ndv)}")
+    print("final_level = " + ("YES" if is_final_level else "NO"))
+
+    if not enabled:
+        return None
+
+    trigger_apply_to = str(adapt_cfg.get("trigger_apply_to", "adaptive_intermediate")).strip().lower()
+    if trigger_apply_to == "adaptive_intermediate" and is_final_level:
+        return None
+    if bool(adapt_cfg.get("trigger_disable_on_final_level", True)) and is_final_level:
+        return None
+
+    return {
+        "enabled": True,
+        "mode": str(adapt_cfg.get("trigger_mode", "slope_efficiency")).strip().lower(),
+        "min_major_iters": int(adapt_cfg.get("trigger_min_major_iters", 5)),
+        "write_csv": bool(adapt_cfg.get("trigger_write_csv", True)),
+        "eps": float(adapt_cfg.get("trigger_eps", 1.0e-300)),
+        "window": int(adapt_cfg.get("trigger_window", 3)),
+        "slope_rel_tol": float(adapt_cfg.get("trigger_slope_rel_tol", 0.05)),
+        "slope_patience": int(adapt_cfg.get("trigger_slope_patience", 1)),
+        "log_objective": bool(adapt_cfg.get("trigger_log_objective", True)),
+        "stag_tol": float(adapt_cfg.get("trigger_stag_tol", 1.0e-3)),
+        "stag_band": float(adapt_cfg.get("trigger_stag_band", 0.02)),
+        "stag_patience": int(adapt_cfg.get("trigger_stag_patience", 3)),
+        "max_major_iters": adapt_cfg.get("trigger_max_major_iters", None),
+        "current_ndv": int(current_ndv),
+        "target_ndv": int(n_final),
+        "level_label": str(level_label),
+        "is_final_level": bool(is_final_level),
+    }
+
+
 def _write_candidate_score_csv(workdir, level, ndv_current, scored_candidates):
     if len(scored_candidates) == 0:
         return None
@@ -857,6 +897,11 @@ def run_adaptive_strategy_from_state(
     n_gradient_evals_total = 0
 
     level_label = f"adaptive_from_state_level_{len(upper_centers) + len(lower_centers)}"
+    trigger_options = _make_adaptive_trigger_options(
+        current_ndv=len(upper_centers) + len(lower_centers),
+        n_final=n_final,
+        level_label=level_label,
+    )
     adaptive_out = optimize_for_centers(
         x=x,
         yu_init=yu_init,
@@ -868,6 +913,7 @@ def run_adaptive_strategy_from_state(
         label=level_label,
         current_best_error=current_best_error,
         workdir=Path(workdir) / "adaptive",
+        trigger_options=trigger_options,
     )
     _save_level_snapshot(
         x=x,
@@ -905,6 +951,10 @@ def run_adaptive_strategy_from_state(
                 "gradient_eval_offset_end": n_gradient_evals_total,
                 "function_eval_history": [dict(item) for item in out["function_eval_history"]],
                 "gradient_eval_history": [dict(item) for item in out["gradient_eval_history"]],
+                "trigger_history": [dict(item) for item in out.get("trigger_history", [])],
+                "early_stop_triggered": bool(out.get("early_stop_triggered", False)),
+                "early_stop_reason": out.get("early_stop_reason", ""),
+                "early_stop_major_iter": out.get("early_stop_major_iter", ""),
             }
         )
         center_history.append(
@@ -1054,6 +1104,9 @@ def run_adaptive_strategy_from_state(
             {
                 "ndv_before": current_ndv,
                 "indicator": indicator_u,
+                "early_stop_triggered_before_refine": bool(adaptive_out.get("early_stop_triggered", False)),
+                "early_stop_reason": adaptive_out.get("early_stop_reason", ""),
+                "early_stop_major_iter": adaptive_out.get("early_stop_major_iter", ""),
                 "selected_candidates": [
                     {
                         "side": cand["side"],
@@ -1080,6 +1133,11 @@ def run_adaptive_strategy_from_state(
         upper_centers = new_upper
         lower_centers = new_lower
         level_label = f"adaptive_from_state_level_{len(new_upper) + len(new_lower)}"
+        trigger_options = _make_adaptive_trigger_options(
+            current_ndv=len(new_upper) + len(new_lower),
+            n_final=n_final,
+            level_label=level_label,
+        )
         adaptive_out = optimize_for_centers(
             x=x,
             yu_init=yu_init,
@@ -1091,6 +1149,7 @@ def run_adaptive_strategy_from_state(
             label=level_label,
             current_best_error=current_best_error,
             workdir=Path(workdir) / "adaptive",
+            trigger_options=trigger_options,
         )
         _save_level_snapshot(
             x=x,
@@ -1123,6 +1182,9 @@ def run_adaptive_strategy_from_state(
     adaptive_out["n_scoring_evals_total"] = n_scoring_aero_calls_total
     adaptive_out["n_optimization_evals_total"] = n_optimization_aero_calls_total
     adaptive_out["n_total_evals"] = n_scoring_aero_calls_total + n_optimization_aero_calls_total
+    adaptive_out["n_early_stopped_levels"] = int(
+        sum(1 for level in history_full_opt if bool(level.get("early_stop_triggered", False)))
+    )
     if indicator_u == "GRAD":
         adaptive_out["grad_score_mode"] = grad_score_mode
     return adaptive_out

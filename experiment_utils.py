@@ -489,7 +489,7 @@ def write_history_csvs(bundle_dir, out, prefix=""):
         if path is not None:
             written.append(path)
 
-    for key in ("function_eval_history", "gradient_eval_history", "objective_history"):
+    for key in ("function_eval_history", "gradient_eval_history", "objective_history", "trigger_history"):
         _record(_write_dict_rows_csv(bundle_dir / f"{prefix}{key}.csv", out.get(key, [])))
 
     if out.get("history"):
@@ -516,6 +516,12 @@ def write_history_csvs(bundle_dir, out, prefix=""):
                     nested_row["level_index"] = level_idx
                     nested_row["ndv_total"] = level.get("ndv_total", "")
                     history_full_opt_nested[nested_key].append(nested_row)
+        for item in level.get("trigger_history", []) or []:
+            if isinstance(item, dict):
+                nested_row = dict(item)
+                nested_row["level_index"] = level_idx
+                nested_row["ndv_total"] = level.get("ndv_total", "")
+                history_full_opt_nested.setdefault("trigger_history", []).append(nested_row)
     _record(_write_dict_rows_csv(bundle_dir / f"{prefix}history_full_opt.csv", history_full_opt_rows))
     for nested_key, rows in history_full_opt_nested.items():
         _record(_write_dict_rows_csv(bundle_dir / f"{prefix}history_full_opt_{nested_key}.csv", rows))
@@ -1216,6 +1222,12 @@ def make_method_result_bundle(method_name, seed, x, yu_init, yl_init, cp_target,
         "history_full_opt": out.get("history_full_opt", []),
         "function_eval_history": out.get("function_eval_history", []),
         "gradient_eval_history": out.get("gradient_eval_history", []),
+        "trigger_history": out.get("trigger_history", []),
+        "early_stop_triggered": bool(out.get("early_stop_triggered", False)),
+        "early_stop_reason": out.get("early_stop_reason", ""),
+        "early_stop_major_iter": out.get("early_stop_major_iter", ""),
+        "early_stop_best_err": safe_float(out.get("early_stop_best_err")),
+        "n_early_stopped_levels": int(out.get("n_early_stopped_levels", 0)),
         "total_scoring_aero_calls": int(extra.get("total_scoring_aero_calls", out.get("n_scoring_aero_calls_total", 0))),
         "total_optimization_aero_calls": int(extra.get("total_optimization_aero_calls", out.get("n_optimization_aero_calls_total", 0))),
         "total_function_evals": int(extra.get("total_function_evals", out.get("n_function_evals_total", out.get("n_function_evals", 0)))),
@@ -1297,6 +1309,21 @@ def build_method_summary_row(seed, err_init, method_results):
             row[f"{metric}_{suffix}"] = safe_float(bundle.get("polar_final", {}).get(metric)) if bundle else float("nan")
         row[f"total_aero_calls_{suffix}"] = int(bundle.get("total_aero_calls", 0)) if bundle else ""
 
+    adapt_grad = method_results.get("ADAPT_GRAD")
+    row["n_early_stopped_levels_adapt_grad"] = (
+        int(adapt_grad.get("n_early_stopped_levels", 0)) if adapt_grad else ""
+    )
+
+    grad_spring_periodic = method_results.get("GRAD_SPRING_PERIODIC")
+    n_periodic_early = ""
+    if grad_spring_periodic:
+        n_periodic_early = 0
+        for block in grad_spring_periodic.get("blocks", []) or []:
+            adapt_out = block.get("adapt_out") if isinstance(block, dict) else None
+            if isinstance(adapt_out, dict):
+                n_periodic_early += int(adapt_out.get("n_early_stopped_levels", 0))
+    row["n_early_stopped_levels_grad_spring_periodic"] = n_periodic_early
+
     periodic = method_results.get("GRAD_SPRING_PERIODIC")
     levels = []
     if periodic:
@@ -1320,8 +1347,12 @@ def method_summary_fields(rows):
     methods = []
     for suffix in ("static", "adapt_grad", "grad_spring_final", "grad_spring_periodic"):
         methods.extend([f"J_{suffix}", f"CL_{suffix}", f"CD_{suffix}", f"CM_{suffix}", f"total_aero_calls_{suffix}"])
+    trigger_fields = [
+        "n_early_stopped_levels_adapt_grad",
+        "n_early_stopped_levels_grad_spring_periodic",
+    ]
     level_fields = sorted({k for row in rows for k in row if k.startswith(("J_after_add_", "J_rebase_start_", "J_after_spring_", "spring_accepted_"))})
     def _level_sort_key(name):
         return (int(name.rsplit("_", 1)[-1]), name)
     level_fields = sorted(level_fields, key=_level_sort_key)
-    return base + methods + level_fields
+    return base + methods + trigger_fields + level_fields

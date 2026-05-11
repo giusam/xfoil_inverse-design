@@ -126,6 +126,21 @@ SETTINGS = {
             "gn_schur_rcond": 1.0e-10,
             "gn_schur_fd_target_peak_normal": None,
             "interval_multi_sample_min_width": None,
+            "trigger_enabled": False,
+            "trigger_mode": "slope_efficiency",
+            "trigger_apply_to": "adaptive_intermediate",
+            "trigger_min_major_iters": 5,
+            "trigger_disable_on_final_level": True,
+            "trigger_write_csv": True,
+            "trigger_eps": 1.0e-300,
+            "trigger_window": 3,
+            "trigger_slope_rel_tol": 0.05,
+            "trigger_slope_patience": 1,
+            "trigger_log_objective": True,
+            "trigger_stag_tol": 1.0e-3,
+            "trigger_stag_band": 0.02,
+            "trigger_stag_patience": 3,
+            "trigger_max_major_iters": None,
         },
     },
 
@@ -273,6 +288,21 @@ _CFG_KEY_MAP = {
     "ADAPT_GN_SCHUR_REG": ("optimization", "adaptive", "gn_schur_reg"),
     "ADAPT_GN_SCHUR_RCOND": ("optimization", "adaptive", "gn_schur_rcond"),
     "ADAPT_GN_SCHUR_FD_TARGET_PEAK_NORMAL": ("optimization", "adaptive", "gn_schur_fd_target_peak_normal"),
+    "ADAPT_TRIGGER_ENABLED": ("optimization", "adaptive", "trigger_enabled"),
+    "ADAPT_TRIGGER_MODE": ("optimization", "adaptive", "trigger_mode"),
+    "ADAPT_TRIGGER_APPLY_TO": ("optimization", "adaptive", "trigger_apply_to"),
+    "ADAPT_TRIGGER_MIN_MAJOR_ITERS": ("optimization", "adaptive", "trigger_min_major_iters"),
+    "ADAPT_TRIGGER_DISABLE_ON_FINAL_LEVEL": ("optimization", "adaptive", "trigger_disable_on_final_level"),
+    "ADAPT_TRIGGER_WRITE_CSV": ("optimization", "adaptive", "trigger_write_csv"),
+    "ADAPT_TRIGGER_EPS": ("optimization", "adaptive", "trigger_eps"),
+    "ADAPT_TRIGGER_WINDOW": ("optimization", "adaptive", "trigger_window"),
+    "ADAPT_TRIGGER_SLOPE_REL_TOL": ("optimization", "adaptive", "trigger_slope_rel_tol"),
+    "ADAPT_TRIGGER_SLOPE_PATIENCE": ("optimization", "adaptive", "trigger_slope_patience"),
+    "ADAPT_TRIGGER_LOG_OBJECTIVE": ("optimization", "adaptive", "trigger_log_objective"),
+    "ADAPT_TRIGGER_STAG_TOL": ("optimization", "adaptive", "trigger_stag_tol"),
+    "ADAPT_TRIGGER_STAG_BAND": ("optimization", "adaptive", "trigger_stag_band"),
+    "ADAPT_TRIGGER_STAG_PATIENCE": ("optimization", "adaptive", "trigger_stag_patience"),
+    "ADAPT_TRIGGER_MAX_MAJOR_ITERS": ("optimization", "adaptive", "trigger_max_major_iters"),
 
     # ---------------------------
     # memory
@@ -426,6 +456,90 @@ def validate_settings():
         if multi_sample_min_width < 0.0:
             raise ValueError("ADAPT_INTERVAL_MULTI_SAMPLE_MIN_WIDTH must be None or >= 0.")
         adapt_cfg["interval_multi_sample_min_width"] = multi_sample_min_width
+
+    def _require_bool(key, cfg_name):
+        value = adapt_cfg.get(key)
+        if not isinstance(value, bool):
+            raise ValueError(f"{cfg_name} must be boolean.")
+        return value
+
+    adapt_cfg["trigger_enabled"] = _require_bool("trigger_enabled", "ADAPT_TRIGGER_ENABLED")
+    trigger_mode = str(adapt_cfg.get("trigger_mode", "slope_efficiency")).strip().lower()
+    supported_trigger_modes = {"slope_efficiency", "stagnation", "hybrid"}
+    if trigger_mode not in supported_trigger_modes:
+        raise ValueError(
+            f"Unsupported ADAPT_TRIGGER_MODE={trigger_mode!r}. "
+            f"Supported modes: {sorted(supported_trigger_modes)}."
+        )
+    adapt_cfg["trigger_mode"] = trigger_mode
+
+    trigger_apply_to = str(adapt_cfg.get("trigger_apply_to", "adaptive_intermediate")).strip().lower()
+    supported_trigger_apply_to = {"adaptive_intermediate", "adaptive_all"}
+    if trigger_apply_to not in supported_trigger_apply_to:
+        raise ValueError(
+            f"Unsupported ADAPT_TRIGGER_APPLY_TO={trigger_apply_to!r}. "
+            f"Supported values: {sorted(supported_trigger_apply_to)}."
+        )
+    adapt_cfg["trigger_apply_to"] = trigger_apply_to
+
+    trigger_min_major_iters = int(adapt_cfg.get("trigger_min_major_iters", 5))
+    if trigger_min_major_iters < 1:
+        raise ValueError("ADAPT_TRIGGER_MIN_MAJOR_ITERS must be >= 1.")
+    adapt_cfg["trigger_min_major_iters"] = trigger_min_major_iters
+
+    adapt_cfg["trigger_disable_on_final_level"] = _require_bool(
+        "trigger_disable_on_final_level",
+        "ADAPT_TRIGGER_DISABLE_ON_FINAL_LEVEL",
+    )
+    adapt_cfg["trigger_write_csv"] = _require_bool("trigger_write_csv", "ADAPT_TRIGGER_WRITE_CSV")
+
+    trigger_eps = float(adapt_cfg.get("trigger_eps", 1.0e-300))
+    if trigger_eps <= 0.0:
+        raise ValueError("ADAPT_TRIGGER_EPS must be > 0.")
+    adapt_cfg["trigger_eps"] = trigger_eps
+
+    trigger_window = int(adapt_cfg.get("trigger_window", 3))
+    if trigger_window < 1:
+        raise ValueError("ADAPT_TRIGGER_WINDOW must be >= 1.")
+    adapt_cfg["trigger_window"] = trigger_window
+
+    trigger_slope_rel_tol = float(adapt_cfg.get("trigger_slope_rel_tol", 0.05))
+    if trigger_slope_rel_tol < 0.0:
+        raise ValueError("ADAPT_TRIGGER_SLOPE_REL_TOL must be >= 0.")
+    adapt_cfg["trigger_slope_rel_tol"] = trigger_slope_rel_tol
+
+    trigger_slope_patience = int(adapt_cfg.get("trigger_slope_patience", 1))
+    if trigger_slope_patience < 1:
+        raise ValueError("ADAPT_TRIGGER_SLOPE_PATIENCE must be >= 1.")
+    adapt_cfg["trigger_slope_patience"] = trigger_slope_patience
+    adapt_cfg["trigger_log_objective"] = _require_bool(
+        "trigger_log_objective",
+        "ADAPT_TRIGGER_LOG_OBJECTIVE",
+    )
+
+    trigger_stag_tol = float(adapt_cfg.get("trigger_stag_tol", 1.0e-3))
+    if trigger_stag_tol < 0.0:
+        raise ValueError("ADAPT_TRIGGER_STAG_TOL must be >= 0.")
+    adapt_cfg["trigger_stag_tol"] = trigger_stag_tol
+
+    trigger_stag_band = float(adapt_cfg.get("trigger_stag_band", 0.02))
+    if trigger_stag_band < 0.0:
+        raise ValueError("ADAPT_TRIGGER_STAG_BAND must be >= 0.")
+    adapt_cfg["trigger_stag_band"] = trigger_stag_band
+
+    trigger_stag_patience = int(adapt_cfg.get("trigger_stag_patience", 3))
+    if trigger_stag_patience < 1:
+        raise ValueError("ADAPT_TRIGGER_STAG_PATIENCE must be >= 1.")
+    adapt_cfg["trigger_stag_patience"] = trigger_stag_patience
+
+    trigger_max_major_iters = adapt_cfg.get("trigger_max_major_iters", None)
+    if trigger_max_major_iters is None:
+        adapt_cfg["trigger_max_major_iters"] = None
+    else:
+        trigger_max_major_iters = int(trigger_max_major_iters)
+        if trigger_max_major_iters < 1:
+            raise ValueError("ADAPT_TRIGGER_MAX_MAJOR_ITERS must be None or >= 1.")
+        adapt_cfg["trigger_max_major_iters"] = trigger_max_major_iters
 
     memory_cfg = SETTINGS.setdefault("memory", {})
     light_history = memory_cfg.get("light_history", True)
