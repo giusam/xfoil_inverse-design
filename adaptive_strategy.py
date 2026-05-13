@@ -126,36 +126,235 @@ def _candidate_beats_interval_best(candidate, current_best):
     if current_best is None:
         return True
 
-    if candidate["score"] > current_best["score"]:
-        return True
-    if candidate["score"] < current_best["score"]:
-        return False
+    cand_key = _interval_best_sort_key(candidate)
+    best_key = _interval_best_sort_key(current_best)
+    return cand_key < best_key
 
-    candidate_midpoint = abs(float(candidate.get("local_fraction", np.nan)) - 0.5) <= 1.0e-12
-    current_best_midpoint = abs(float(current_best.get("local_fraction", np.nan)) - 0.5) <= 1.0e-12
-    if candidate_midpoint and not current_best_midpoint:
-        return True
-    if current_best_midpoint and not candidate_midpoint:
-        return False
 
-    return False
+def _finite_score(value, default=-np.inf):
+    try:
+        value = float(value)
+    except Exception:
+        return float(default)
+    if not np.isfinite(value):
+        return float(default)
+    return value
+
+
+def _interval_best_sort_key(candidate):
+    score = _finite_score(candidate.get("score", -np.inf))
+    local_fraction = float(candidate.get("local_fraction", np.nan))
+    if not np.isfinite(local_fraction):
+        midpoint_distance = float("inf")
+    else:
+        midpoint_distance = abs(local_fraction - 0.5)
+    center = float(candidate.get("x", np.inf))
+    if not np.isfinite(center):
+        center = float("inf")
+    return (
+        -score,
+        midpoint_distance,
+        center,
+        str(candidate.get("side", "")),
+        int(candidate.get("interval_id", 0)),
+        str(candidate.get("interval_label", "")),
+    )
 
 
 def reduce_to_best_candidate_per_interval(scored_candidates):
     winners = {}
-    encounter_order = []
 
     for item in scored_candidates:
-        interval_key = (item["side"], item["interval_id"])
+        interval_key = (str(item["side"]).upper(), int(item["interval_id"]))
         if interval_key not in winners:
             winners[interval_key] = item
-            encounter_order.append(interval_key)
             continue
 
         if _candidate_beats_interval_best(item, winners[interval_key]):
             winners[interval_key] = item
 
-    return [winners[key] for key in encounter_order]
+    return [winners[key] for key in sorted(winners)]
+
+
+def _candidate_global_sort_key(candidate):
+    score = _finite_score(candidate.get("score", -np.inf))
+    center = float(candidate.get("x", np.inf))
+    if not np.isfinite(center):
+        center = float("inf")
+    return (
+        -score,
+        str(candidate.get("side", "")),
+        center,
+        int(candidate.get("interval_id", 0)),
+        str(candidate.get("interval_label", "")),
+    )
+
+
+def select_adaptive_candidate_batch(
+    interval_best_candidates,
+    n_remaining,
+    max_batch_size,
+    score_rel_tol,
+    min_separation,
+    max_per_side=None,
+):
+    if int(n_remaining) <= 0 or not interval_best_candidates:
+        return []
+
+    limit = min(int(max_batch_size), int(n_remaining))
+    if limit <= 0:
+        return []
+
+    candidates = sorted(interval_best_candidates, key=_candidate_global_sort_key)
+    selected = [candidates[0]]
+    selected_per_side = {str(candidates[0].get("side", "")).upper(): 1}
+    best_score = _finite_score(candidates[0].get("score", -np.inf))
+    if not np.isfinite(best_score) or best_score <= 0.0:
+        return selected
+
+    threshold = float(score_rel_tol) * best_score
+    min_separation = float(min_separation)
+    for candidate in candidates[1:]:
+        if len(selected) >= limit:
+            break
+
+        score = _finite_score(candidate.get("score", -np.inf))
+        if score < threshold:
+            continue
+
+        side = str(candidate.get("side", "")).upper()
+        if max_per_side is not None and selected_per_side.get(side, 0) >= int(max_per_side):
+            continue
+
+        center = float(candidate.get("x", np.nan))
+        if not np.isfinite(center):
+            continue
+        too_close = False
+        for chosen in selected:
+            if str(chosen.get("side", "")).upper() != side:
+                continue
+            chosen_center = float(chosen.get("x", np.nan))
+            if np.isfinite(chosen_center) and abs(center - chosen_center) < min_separation:
+                too_close = True
+                break
+        if too_close:
+            continue
+
+        selected.append(candidate)
+        selected_per_side[side] = selected_per_side.get(side, 0) + 1
+
+    return selected
+
+
+def _annotate_candidate_selection(scored_candidates, interval_best_candidates, selected_candidates):
+    interval_best_ids = {id(item) for item in interval_best_candidates}
+    selected_ids = {id(item) for item in selected_candidates}
+    interval_best_score = {}
+    for item in interval_best_candidates:
+        key = (str(item.get("side", "")).upper(), int(item.get("interval_id", 0)))
+        interval_best_score[key] = _finite_score(item.get("score", np.nan), default=np.nan)
+    finite_scores = [_finite_score(item.get("score", np.nan), default=np.nan) for item in scored_candidates]
+    finite_scores = [v for v in finite_scores if np.isfinite(v)]
+    global_best = max(finite_scores) if finite_scores else float("nan")
+
+    for item in scored_candidates:
+        key = (str(item.get("side", "")).upper(), int(item.get("interval_id", 0)))
+        score = _finite_score(item.get("score", np.nan), default=np.nan)
+        best_interval = interval_best_score.get(key, float("nan"))
+        item["is_interval_best"] = bool(id(item) in interval_best_ids)
+        item["selected_in_batch"] = bool(id(item) in selected_ids)
+        item["score_ratio_to_interval_best"] = (
+            score / best_interval if np.isfinite(score) and np.isfinite(best_interval) and best_interval != 0.0 else np.nan
+        )
+        item["score_ratio_to_global_best"] = (
+            score / global_best if np.isfinite(score) and np.isfinite(global_best) and global_best != 0.0 else np.nan
+        )
+
+
+def _score_ratio_to_best(candidate, best_score):
+    score = _finite_score(candidate.get("score", np.nan), default=np.nan)
+    if not np.isfinite(score) or not np.isfinite(best_score) or best_score == 0.0:
+        return np.nan
+    return score / best_score
+
+
+def _selected_candidate_record(candidate, best_score):
+    return {
+        "side": candidate["side"],
+        "interval_id": int(candidate["interval_id"]),
+        "interval_label": str(candidate.get("interval_label", candidate["interval_id"])),
+        "x_left": float(candidate["x_left"]),
+        "x_right": float(candidate["x_right"]),
+        "local_fraction": float(candidate.get("local_fraction", 0.5)),
+        "center": float(candidate["x"]),
+        "score": float(candidate["score"]),
+        "score_ratio_to_best": float(_score_ratio_to_best(candidate, best_score)),
+    }
+
+
+def _print_refinement_batch_summary(
+    title,
+    current_ndv,
+    n_final,
+    batch_enabled,
+    batch_size_max,
+    score_rel_tol,
+    min_separation,
+    max_per_side,
+    n_raw,
+    n_interval_best,
+    chosen,
+    current_best_error,
+):
+    best_score = _finite_score(chosen[0].get("score", np.nan), default=np.nan) if chosen else np.nan
+    print(title)
+    print(f"current ndv before refinement = {int(current_ndv)}")
+    print(f"target final ndv              = {int(n_final)}")
+    print("batch enabled                 = " + ("YES" if batch_enabled else "NO"))
+    print(f"max batch size                = {int(batch_size_max)}")
+    print(f"score relative tolerance      = {float(score_rel_tol):.6f}")
+    print(f"min separation                = {float(min_separation):.6f}")
+    print(f"max per side                  = {max_per_side}")
+    print(f"raw candidates                = {int(n_raw)}")
+    print(f"interval-best candidates      = {int(n_interval_best)}")
+    print(f"selected candidates           = {len(chosen)}")
+    print(f"current best err              = {float(current_best_error):.6e}")
+    print("selected candidates =")
+    for cand in chosen:
+        ratio = _score_ratio_to_best(cand, best_score)
+        interval_label = cand.get("interval_label", cand.get("interval_id", "?"))
+        print(
+            f"  side={cand['side']} interval={cand['interval_id']} label={interval_label} "
+            f"x_left={float(cand['x_left']):.6f} x_right={float(cand['x_right']):.6f} "
+            f"fraction={float(cand.get('local_fraction', 0.5)):.2f} "
+            f"center={float(cand['x']):.6f} score={float(cand['score']):.6e} "
+            f"score_ratio_to_best={float(ratio):.6e}"
+        )
+
+
+def _select_refinement_candidates(scored_local, current_ndv, n_final, opt_ad):
+    interval_best = reduce_to_best_candidate_per_interval(scored_local)
+    batch_enabled = bool(opt_ad.get("refine_batch_enabled", False))
+    n_remaining = int(n_final) - int(current_ndv)
+
+    if batch_enabled:
+        chosen = select_adaptive_candidate_batch(
+            interval_best_candidates=interval_best,
+            n_remaining=n_remaining,
+            max_batch_size=int(opt_ad.get("refine_batch_size_max", 1)),
+            score_rel_tol=float(opt_ad.get("refine_batch_score_rel_tol", 0.85)),
+            min_separation=float(opt_ad.get("refine_batch_min_separation", 0.04)),
+            max_per_side=opt_ad.get("refine_batch_max_per_side", None),
+        )
+    else:
+        scored = list(interval_best)
+        scored.sort(key=lambda item: (-item["score"], item["x"]))
+        n_add = _compute_adaptive_nadd(current_ndv, len(scored))
+        n_add = min(n_add, n_remaining)
+        chosen = scored[:n_add] if n_add > 0 else []
+
+    _annotate_candidate_selection(scored_local, interval_best, chosen)
+    return interval_best, chosen
 
 
 def _format_selected_candidate_summary(indicator, candidate):
@@ -235,6 +434,10 @@ def _write_candidate_score_csv(workdir, level, ndv_current, scored_candidates):
         "interval_width",
         "n_samples_for_interval",
         "sampling_fallback_midpoint",
+        "is_interval_best",
+        "selected_in_batch",
+        "score_ratio_to_interval_best",
+        "score_ratio_to_global_best",
         "score_mode",
         "score",
         "g_norm",
@@ -267,6 +470,10 @@ def _write_candidate_score_csv(workdir, level, ndv_current, scored_candidates):
                 "interval_width": float(item.get("interval_width", np.nan)),
                 "n_samples_for_interval": int(item.get("n_samples_for_interval", 0)),
                 "sampling_fallback_midpoint": bool(item.get("sampling_fallback_midpoint", False)),
+                "is_interval_best": bool(item.get("is_interval_best", False)),
+                "selected_in_batch": bool(item.get("selected_in_batch", False)),
+                "score_ratio_to_interval_best": float(item.get("score_ratio_to_interval_best", np.nan)),
+                "score_ratio_to_global_best": float(item.get("score_ratio_to_global_best", np.nan)),
                 "score_mode": item.get("score_mode", ""),
                 "score": float(item.get("score", np.nan)),
                 "g_norm": float(item.get("g_norm", np.nan)),
@@ -639,6 +846,19 @@ def _run_adaptive_strategy_legacy_unused(
                 }
             )
 
+        interval_best, chosen = _select_refinement_candidates(
+            scored_local=scored_local,
+            current_ndv=current_ndv,
+            n_final=n_final,
+            opt_ad=opt_ad,
+        )
+        diag_scored = list(interval_best)
+        if bool(opt_ad.get("refine_batch_enabled", False)):
+            diag_scored.sort(key=_candidate_global_sort_key)
+        else:
+            diag_scored.sort(key=lambda item: (-item["score"], item["x"]))
+        _print_candidate_diagnostics(diag_scored, topk=12)
+
         if indicator_u == "GRAD" and bool(opt_ad.get("write_candidate_score_csv", True)):
             csv_path = _write_candidate_score_csv(
                 workdir=workdir,
@@ -650,31 +870,13 @@ def _run_adaptive_strategy_legacy_unused(
                 print(f"Candidate score CSV written: {csv_path[0]}")
                 print(f"Persistent candidate score CSV written: {csv_path[1]}")
 
-        scored = reduce_to_best_candidate_per_interval(scored_local)
-        scored.sort(key=lambda item: (-item["score"], item["x"]))
-        _print_candidate_diagnostics(scored, topk=12)
-
         if str(SETTINGS.get("aero", {}).get("backend", "xfoil")).strip().lower() == "cmplxfoil":
             clear_cmplxfoil_solver_cache()
             gc.collect()
 
         
-        n_remaining = n_final - current_ndv
-        n_add = _compute_adaptive_nadd(current_ndv, len(scored))
-        n_add = min(n_add, n_remaining)
-
-        if n_add <= 0:
+        if len(chosen) <= 0:
             break
-
-        chosen = scored[:n_add]
-
-        print("===== ADAPTIVE REFINE =====")
-        print(f"current ndv       = {current_ndv}")
-        print(f"growth ratio      = {SETTINGS['optimization']['adaptive']['growth_ratio']:.6f}")
-        print(f"current best err  = {current_best_error:.6e}")
-        print("chosen candidates =")
-        for cand in chosen:
-            print(f"  {_format_selected_candidate_summary(indicator, cand)}")
 
         new_upper = sorted(list(upper_centers))
         new_lower = sorted(list(lower_centers))
@@ -687,24 +889,43 @@ def _run_adaptive_strategy_legacy_unused(
 
         new_upper = sorted(set(new_upper))
         new_lower = sorted(set(new_lower))
+        ndv_after = len(new_upper) + len(new_lower)
+        best_score = _finite_score(chosen[0].get("score", np.nan), default=np.nan)
+
+        _print_refinement_batch_summary(
+            title="===== ADAPTIVE REFINE =====",
+            current_ndv=current_ndv,
+            n_final=n_final,
+            batch_enabled=bool(opt_ad.get("refine_batch_enabled", False)),
+            batch_size_max=int(opt_ad.get("refine_batch_size_max", 1)),
+            score_rel_tol=float(opt_ad.get("refine_batch_score_rel_tol", 0.85)),
+            min_separation=float(opt_ad.get("refine_batch_min_separation", 0.04)),
+            max_per_side=opt_ad.get("refine_batch_max_per_side", None),
+            n_raw=len(scored_local),
+            n_interval_best=len(interval_best),
+            chosen=chosen,
+            current_best_error=current_best_error,
+        )
+        print(
+            f"adaptive batch summary: ndv {current_ndv} -> {ndv_after}, "
+            f"n_added={ndv_after - current_ndv}, "
+            f"centers={[float(c['x']) for c in chosen]}, "
+            f"scores={[float(c['score']) for c in chosen]}, "
+            f"ratios={[float(_score_ratio_to_best(c, best_score)) for c in chosen]}"
+        )
 
         selection_history.append(
             {
                 "ndv_before": current_ndv,
+                "ndv_after": ndv_after,
+                "n_added": ndv_after - current_ndv,
                 "indicator": str(indicator).upper(),
-                "selected_candidates": [
-                    {
-                        "side": cand["side"],
-                        "interval_id": int(cand["interval_id"]),
-                        "interval_label": str(cand.get("interval_label", cand["interval_id"])),
-                        "x_left": float(cand["x_left"]),
-                        "x_right": float(cand["x_right"]),
-                        "local_fraction": float(cand.get("local_fraction", 0.5)),
-                        "center": float(cand["x"]),
-                        "score": float(cand["score"]),
-                    }
-                    for cand in chosen
-                ],
+                "batch_enabled": bool(opt_ad.get("refine_batch_enabled", False)),
+                "batch_size_max": int(opt_ad.get("refine_batch_size_max", 1)),
+                "batch_score_rel_tol": float(opt_ad.get("refine_batch_score_rel_tol", 0.85)),
+                "batch_min_separation": float(opt_ad.get("refine_batch_min_separation", 0.04)),
+                "batch_max_per_side": opt_ad.get("refine_batch_max_per_side", None),
+                "selected_candidates": [_selected_candidate_record(cand, best_score) for cand in chosen],
             }
         )
 
@@ -863,6 +1084,7 @@ def run_adaptive_strategy_from_state(
     initial_lower_centers,
     initial_a0,
     n_final_override,
+    max_refinements=None,
 ):
     opt_ad = SETTINGS["optimization"]["adaptive"]
     indicator_u = str(indicator).upper()
@@ -895,6 +1117,7 @@ def run_adaptive_strategy_from_state(
     n_optimization_aero_calls_total = 0
     n_function_evals_total = 0
     n_gradient_evals_total = 0
+    n_refinements_done = 0
 
     level_label = f"adaptive_from_state_level_{len(upper_centers) + len(lower_centers)}"
     trigger_options = _make_adaptive_trigger_options(
@@ -1057,6 +1280,19 @@ def run_adaptive_strategy_from_state(
                 }
             )
 
+        interval_best, chosen = _select_refinement_candidates(
+            scored_local=scored_local,
+            current_ndv=current_ndv,
+            n_final=n_final,
+            opt_ad=opt_ad,
+        )
+        diag_scored = list(interval_best)
+        if bool(opt_ad.get("refine_batch_enabled", False)):
+            diag_scored.sort(key=_candidate_global_sort_key)
+        else:
+            diag_scored.sort(key=lambda item: (-item["score"], item["x"]))
+        _print_candidate_diagnostics(diag_scored, topk=12)
+
         if indicator_u == "GRAD" and bool(opt_ad.get("write_candidate_score_csv", True)):
             csv_path = _write_candidate_score_csv(
                 workdir=workdir,
@@ -1068,27 +1304,12 @@ def run_adaptive_strategy_from_state(
                 print(f"Candidate score CSV written: {csv_path[0]}")
                 print(f"Persistent candidate score CSV written: {csv_path[1]}")
 
-        scored = reduce_to_best_candidate_per_interval(scored_local)
-        scored.sort(key=lambda item: (-item["score"], item["x"]))
-        _print_candidate_diagnostics(scored, topk=12)
-
         if str(SETTINGS.get("aero", {}).get("backend", "xfoil")).strip().lower() == "cmplxfoil":
             clear_cmplxfoil_solver_cache()
             gc.collect()
 
-        n_remaining = n_final - current_ndv
-        n_add = min(_compute_adaptive_nadd(current_ndv, len(scored)), n_remaining)
-        if n_add <= 0:
+        if len(chosen) <= 0:
             break
-
-        chosen = scored[:n_add]
-        print("===== ADAPTIVE REFINE FROM STATE =====")
-        print(f"current ndv       = {current_ndv}")
-        print(f"target ndv        = {n_final}")
-        print(f"current best err  = {current_best_error:.6e}")
-        print("chosen candidates =")
-        for cand in chosen:
-            print(f"  {_format_selected_candidate_summary(indicator, cand)}")
 
         new_upper = sorted(list(upper_centers))
         new_lower = sorted(list(lower_centers))
@@ -1099,27 +1320,46 @@ def run_adaptive_strategy_from_state(
                 new_lower.append(float(cand["x"]))
         new_upper = sorted(set(new_upper))
         new_lower = sorted(set(new_lower))
+        ndv_after = len(new_upper) + len(new_lower)
+        best_score = _finite_score(chosen[0].get("score", np.nan), default=np.nan)
+
+        _print_refinement_batch_summary(
+            title="===== ADAPTIVE REFINE FROM STATE =====",
+            current_ndv=current_ndv,
+            n_final=n_final,
+            batch_enabled=bool(opt_ad.get("refine_batch_enabled", False)),
+            batch_size_max=int(opt_ad.get("refine_batch_size_max", 1)),
+            score_rel_tol=float(opt_ad.get("refine_batch_score_rel_tol", 0.85)),
+            min_separation=float(opt_ad.get("refine_batch_min_separation", 0.04)),
+            max_per_side=opt_ad.get("refine_batch_max_per_side", None),
+            n_raw=len(scored_local),
+            n_interval_best=len(interval_best),
+            chosen=chosen,
+            current_best_error=current_best_error,
+        )
+        print(
+            f"adaptive batch summary: ndv {current_ndv} -> {ndv_after}, "
+            f"n_added={ndv_after - current_ndv}, "
+            f"centers={[float(c['x']) for c in chosen]}, "
+            f"scores={[float(c['score']) for c in chosen]}, "
+            f"ratios={[float(_score_ratio_to_best(c, best_score)) for c in chosen]}"
+        )
 
         selection_history.append(
             {
                 "ndv_before": current_ndv,
+                "ndv_after": ndv_after,
+                "n_added": ndv_after - current_ndv,
                 "indicator": indicator_u,
                 "early_stop_triggered_before_refine": bool(adaptive_out.get("early_stop_triggered", False)),
                 "early_stop_reason": adaptive_out.get("early_stop_reason", ""),
                 "early_stop_major_iter": adaptive_out.get("early_stop_major_iter", ""),
-                "selected_candidates": [
-                    {
-                        "side": cand["side"],
-                        "interval_id": int(cand["interval_id"]),
-                        "interval_label": str(cand.get("interval_label", cand["interval_id"])),
-                        "x_left": float(cand["x_left"]),
-                        "x_right": float(cand["x_right"]),
-                        "local_fraction": float(cand.get("local_fraction", 0.5)),
-                        "center": float(cand["x"]),
-                        "score": float(cand["score"]),
-                    }
-                    for cand in chosen
-                ],
+                "batch_enabled": bool(opt_ad.get("refine_batch_enabled", False)),
+                "batch_size_max": int(opt_ad.get("refine_batch_size_max", 1)),
+                "batch_score_rel_tol": float(opt_ad.get("refine_batch_score_rel_tol", 0.85)),
+                "batch_min_separation": float(opt_ad.get("refine_batch_min_separation", 0.04)),
+                "batch_max_per_side": opt_ad.get("refine_batch_max_per_side", None),
+                "selected_candidates": [_selected_candidate_record(cand, best_score) for cand in chosen],
             }
         )
 
@@ -1165,6 +1405,9 @@ def run_adaptive_strategy_from_state(
         n_function_evals_total += adaptive_out["n_function_evals"]
         n_gradient_evals_total += adaptive_out["n_gradient_evals"]
         _record_level(adaptive_out)
+        n_refinements_done += 1
+        if max_refinements is not None and n_refinements_done >= int(max_refinements):
+            break
 
     adaptive_out["history"] = history
     adaptive_out["history_evals"] = history_evals

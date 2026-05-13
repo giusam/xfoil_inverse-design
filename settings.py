@@ -126,6 +126,11 @@ SETTINGS = {
             "gn_schur_rcond": 1.0e-10,
             "gn_schur_fd_target_peak_normal": None,
             "interval_multi_sample_min_width": None,
+            "refine_batch_enabled": False,
+            "refine_batch_size_max": 1,
+            "refine_batch_score_rel_tol": 0.85,
+            "refine_batch_min_separation": 0.04,
+            "refine_batch_max_per_side": None,
             "trigger_enabled": False,
             "trigger_mode": "slope_efficiency",
             "trigger_apply_to": "adaptive_intermediate",
@@ -288,6 +293,11 @@ _CFG_KEY_MAP = {
     "ADAPT_GN_SCHUR_REG": ("optimization", "adaptive", "gn_schur_reg"),
     "ADAPT_GN_SCHUR_RCOND": ("optimization", "adaptive", "gn_schur_rcond"),
     "ADAPT_GN_SCHUR_FD_TARGET_PEAK_NORMAL": ("optimization", "adaptive", "gn_schur_fd_target_peak_normal"),
+    "ADAPT_REFINE_BATCH_ENABLED": ("optimization", "adaptive", "refine_batch_enabled"),
+    "ADAPT_REFINE_BATCH_SIZE_MAX": ("optimization", "adaptive", "refine_batch_size_max"),
+    "ADAPT_REFINE_BATCH_SCORE_REL_TOL": ("optimization", "adaptive", "refine_batch_score_rel_tol"),
+    "ADAPT_REFINE_BATCH_MIN_SEPARATION": ("optimization", "adaptive", "refine_batch_min_separation"),
+    "ADAPT_REFINE_BATCH_MAX_PER_SIDE": ("optimization", "adaptive", "refine_batch_max_per_side"),
     "ADAPT_TRIGGER_ENABLED": ("optimization", "adaptive", "trigger_enabled"),
     "ADAPT_TRIGGER_MODE": ("optimization", "adaptive", "trigger_mode"),
     "ADAPT_TRIGGER_APPLY_TO": ("optimization", "adaptive", "trigger_apply_to"),
@@ -462,6 +472,34 @@ def validate_settings():
         if not isinstance(value, bool):
             raise ValueError(f"{cfg_name} must be boolean.")
         return value
+
+    adapt_cfg["refine_batch_enabled"] = _require_bool(
+        "refine_batch_enabled",
+        "ADAPT_REFINE_BATCH_ENABLED",
+    )
+    refine_batch_size_max = int(adapt_cfg.get("refine_batch_size_max", 1))
+    if refine_batch_size_max < 1:
+        raise ValueError("ADAPT_REFINE_BATCH_SIZE_MAX must be an integer >= 1.")
+    adapt_cfg["refine_batch_size_max"] = refine_batch_size_max
+
+    refine_batch_score_rel_tol = float(adapt_cfg.get("refine_batch_score_rel_tol", 0.85))
+    if not (0.0 <= refine_batch_score_rel_tol <= 1.0):
+        raise ValueError("ADAPT_REFINE_BATCH_SCORE_REL_TOL must satisfy 0 <= value <= 1.")
+    adapt_cfg["refine_batch_score_rel_tol"] = refine_batch_score_rel_tol
+
+    refine_batch_min_separation = float(adapt_cfg.get("refine_batch_min_separation", 0.04))
+    if refine_batch_min_separation < 0.0:
+        raise ValueError("ADAPT_REFINE_BATCH_MIN_SEPARATION must be >= 0.")
+    adapt_cfg["refine_batch_min_separation"] = refine_batch_min_separation
+
+    refine_batch_max_per_side = adapt_cfg.get("refine_batch_max_per_side", None)
+    if refine_batch_max_per_side is None:
+        adapt_cfg["refine_batch_max_per_side"] = None
+    else:
+        refine_batch_max_per_side = int(refine_batch_max_per_side)
+        if refine_batch_max_per_side < 1:
+            raise ValueError("ADAPT_REFINE_BATCH_MAX_PER_SIDE must be None or an integer >= 1.")
+        adapt_cfg["refine_batch_max_per_side"] = refine_batch_max_per_side
 
     adapt_cfg["trigger_enabled"] = _require_bool("trigger_enabled", "ADAPT_TRIGGER_ENABLED")
     trigger_mode = str(adapt_cfg.get("trigger_mode", "slope_efficiency")).strip().lower()

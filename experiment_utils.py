@@ -1028,12 +1028,24 @@ def run_grad_spring_periodic_pipeline(
     cfg = SETTINGS["adaptive_spring"]
     mode, levels = _resolve_adaptive_spring_levels()
     n0 = int(SETTINGS["optimization"]["adaptive"]["n0"])
+    adapt_cfg = SETTINGS["optimization"]["adaptive"]
+    n_final = int(adapt_cfg["n_final"])
+    dynamic_every_refine_batch = (
+        mode == "every_refine"
+        and bool(adapt_cfg.get("refine_batch_enabled", False))
+        and int(adapt_cfg.get("refine_batch_size_max", 1)) > 1
+    )
     if mode == "final":
         raise ValueError("run_grad_spring_periodic_pipeline requires mode 'levels' or 'every_refine'.")
     if not levels:
         raise ValueError("Periodic spring levels must contain at least one level.")
     print(f"ADAPTIVE_SPRING mode = {mode}")
     print(f"adaptive spring levels = {levels}")
+    if dynamic_every_refine_batch:
+        print(
+            "adaptive spring every_refine follows adaptive batch steps; "
+            f"max batch size = {int(adapt_cfg.get('refine_batch_size_max', 1))}"
+        )
     if str(cfg.get("accept_mode_intermediate", "rebase_keep_new_centers")).strip().lower() != "rebase_keep_new_centers":
         raise ValueError("ADAPTIVE_SPRING_ACCEPT_MODE_INTERMEDIATE supports only 'rebase_keep_new_centers'.")
     if str(cfg.get("accept_mode_final", "accept_if_improved")).strip().lower() != "accept_if_improved":
@@ -1055,14 +1067,30 @@ def run_grad_spring_periodic_pipeline(
     final_out = None
     final_method = ""
 
-    for target_level in levels:
+    level_index = 0
+    while True:
+        if dynamic_every_refine_batch:
+            if len(current_upper) + len(current_lower) >= n_final:
+                break
+            target_level = min(
+                len(current_upper) + len(current_lower) + int(adapt_cfg.get("refine_batch_size_max", 1)),
+                n_final,
+            )
+            is_final_target = target_level >= n_final
+        else:
+            if level_index >= len(levels):
+                break
+            target_level = levels[level_index]
+            level_index += 1
+            is_final_target = target_level == levels[-1]
+
         block_initial_error = float(current_error)
         current_ndv = len(current_upper) + len(current_lower)
         if target_level < current_ndv:
             raise ValueError(f"Periodic target level {target_level} is smaller than current ndv {current_ndv}.")
         print("===== PERIODIC ADAPT_GRAD BLOCK =====")
         print(f"current ndv = {current_ndv}")
-        print(f"target ndv  = {target_level}")
+        print(f"requested target ndv = {target_level}")
 
         block_dir = workdir / f"block_{target_level:03d}_adapt"
         adapt_out = run_adaptive_strategy_from_state(
@@ -1077,23 +1105,27 @@ def run_grad_spring_periodic_pipeline(
             initial_lower_centers=current_lower,
             initial_a0=current_a0,
             n_final_override=target_level,
+            max_refinements=1 if dynamic_every_refine_batch else None,
         )
-        save_out_bundle(block_dir, x=x, out=adapt_out, name=f"PERIODIC_ADAPT_{target_level}")
+        actual_level = int(adapt_out.get("ndv_total", target_level))
+        level_for_bookkeeping = actual_level if dynamic_every_refine_batch else target_level
+        print(f"actual adapted ndv   = {actual_level}")
+        save_out_bundle(block_dir, x=x, out=adapt_out, name=f"PERIODIC_ADAPT_{level_for_bookkeeping}")
         total_scoring += int(adapt_out.get("n_scoring_aero_calls_total", 0))
         total_optimization += int(adapt_out.get("n_optimization_aero_calls_total", 0))
         total_function += int(adapt_out.get("n_function_evals_total", 0))
         total_gradient += int(adapt_out.get("n_gradient_evals_total", 0))
 
-        spring_dir = workdir / f"block_{target_level:03d}_spring"
+        spring_dir = workdir / f"block_{level_for_bookkeeping:03d}_spring"
         spring_result = _run_spring_rebase_reopt(
             x=x,
             adapt_out=adapt_out,
             cp_target=cp_target,
             workdir=spring_dir,
-            label=f"periodic_spring_rebase_level_{target_level}",
-            rebase_label=f"periodic_rebase_start_level_{target_level}",
-            save_name=f"GRAD_SPRING_LEVEL_{target_level}",
-            diagnostics_level=target_level,
+            label=f"periodic_spring_rebase_level_{level_for_bookkeeping}",
+            rebase_label=f"periodic_rebase_start_level_{level_for_bookkeeping}",
+            save_name=f"GRAD_SPRING_LEVEL_{level_for_bookkeeping}",
+            diagnostics_level=level_for_bookkeeping,
             diagnostics_root=workdir,
             rebase_start_dir=spring_dir / "rebase_start",
             reopt_dir=spring_dir / "reopt",
@@ -1109,7 +1141,10 @@ def run_grad_spring_periodic_pipeline(
         total_function += int(spring_result["spring_function_evals"])
         total_gradient += int(spring_result["spring_gradient_evals"])
 
-        is_final = target_level == levels[-1]
+        if dynamic_every_refine_batch:
+            is_final = actual_level >= n_final
+        else:
+            is_final = bool(is_final_target)
         improved = bool(spring_result["accepted"])
         rebase_start_out = _make_rebase_start_out(adapt_out, new_upper, new_lower, start_eval)
         if is_final:
@@ -1117,12 +1152,12 @@ def run_grad_spring_periodic_pipeline(
                 final_out = spring_out
                 spring_accepted = True
                 state_used_after = "spring_reopt"
-                final_method = f"periodic_spring_reopt_level_{target_level}"
+                final_method = f"periodic_spring_reopt_level_{level_for_bookkeeping}"
             else:
                 final_out = adapt_out
                 spring_accepted = False
                 state_used_after = "adapt_before_spring"
-                final_method = f"periodic_adapt_level_{target_level}"
+                final_method = f"periodic_adapt_level_{level_for_bookkeeping}"
             save_out_bundle(workdir / "final", x=x, out=final_out, name="GRAD_SPRING_PERIODIC_FINAL")
         else:
             if improved:
@@ -1140,11 +1175,16 @@ def run_grad_spring_periodic_pipeline(
             current_upper = list(np.asarray(state_for_next["upper_centers"], dtype=float))
             current_lower = list(np.asarray(state_for_next["lower_centers"], dtype=float))
             current_a0 = np.zeros(len(current_upper) + len(current_lower), dtype=float)
-            save_out_bundle(workdir / f"block_{target_level:03d}_state_for_next", x=x, out=state_for_next, name=f"PERIODIC_STATE_{target_level}")
+            save_out_bundle(
+                workdir / f"block_{level_for_bookkeeping:03d}_state_for_next",
+                x=x,
+                out=state_for_next,
+                name=f"PERIODIC_STATE_{level_for_bookkeeping}",
+            )
 
         block_history.append(
             {
-                "target_level": int(target_level),
+                "target_level": int(level_for_bookkeeping),
                 "J_before_spring": safe_float(adapt_out.get("err_opt")),
                 "J_rebase_start": safe_float(start_eval.get("err")),
                 "J_after_spring": safe_float(spring_out.get("err_opt") if spring_out is not None else None),
@@ -1159,7 +1199,7 @@ def run_grad_spring_periodic_pipeline(
         )
         blocks.append(
             {
-                "target_level": int(target_level),
+                "target_level": int(level_for_bookkeeping),
                 "initial_error": float(block_initial_error),
                 "adapt_out": adapt_out,
                 "spring_out": spring_out,
@@ -1172,6 +1212,9 @@ def run_grad_spring_periodic_pipeline(
                 "state_used_after": state_used_after,
             }
         )
+
+        if is_final:
+            break
 
     if final_out is None:
         raise RuntimeError("Periodic spring pipeline did not produce a final result.")
